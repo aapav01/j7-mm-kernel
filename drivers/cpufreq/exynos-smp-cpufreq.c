@@ -147,7 +147,7 @@ static atomic_t cluster_usage[MAX_CLUSTERS] = {ATOMIC_INIT(0), ATOMIC_INIT(0)};
 static atomic_t cluster_usage[MAX_CLUSTERS] = {ATOMIC_INIT(0)};
 #endif
 static unsigned int alt_freq[MAX_CLUSTERS];
-static const unsigned int boost_freq = 1300000; /* KHz */
+static const unsigned int boost_freq = 1400000; /* KHz */
 #ifndef CONFIG_EXYNOS7580_QUAD
 static unsigned int maxlock_freq;
 #endif
@@ -915,7 +915,8 @@ static int exynos_cpufreq_init(struct cpufreq_policy *policy)
 	policy->cur = exynos_cpufreq_get(policy->cpu);
 	/* Later this code will be removed. This is for first lot */
 	policy->cpuinfo.min_freq = 400000;
-	freq_table[cur_cluster][13].frequency = CPUFREQ_ENTRY_INVALID;
+	policy->cpuinfo.max_freq = 1600000;
+	//freq_table[cur_cluster][13].frequency = CPUFREQ_ENTRY_INVALID;
 
 	if (samsung_rev() == EXYNOS7580_REV_0) {
 		if (!support_full_frequency())
@@ -923,12 +924,12 @@ static int exynos_cpufreq_init(struct cpufreq_policy *policy)
 		else
 			policy->cpuinfo.max_freq = 1400000;
 	} else if (soc_is_exynos7580_v1()) {
-		policy->cpuinfo.max_freq = 1500000;
-		freq_table[cur_cluster][0].frequency = CPUFREQ_ENTRY_INVALID;
+		policy->cpuinfo.max_freq = 1600000;
+		//freq_table[cur_cluster][0].frequency = CPUFREQ_ENTRY_INVALID;
 	}
 
 	if (soc_is_exynos7580_v1())
-		policy->cpuinfo.max_freq = 1500000;
+		policy->cpuinfo.max_freq = 1600000;
 
 	cpumask_copy(policy->cpus, topology_core_cpumask(policy->cpu));
 
@@ -1356,8 +1357,8 @@ static int exynos_smp_probe(struct platform_device *pdev)
 	of_node_put(np);
 
 	if (soc_is_exynos7580_v1()) {
-		pm_qos_add_request(&pm_qos_mif, PM_QOS_BUS_THROUGHPUT, exynos_bus_table[ARRAY_SIZE(apll_freq) - 2]);
-		pm_qos_add_request(&cluster_qos_max[CL_ZERO], PM_QOS_CLUSTER0_FREQ_MAX, apll_freq[1].freq / 1000);
+		pm_qos_add_request(&pm_qos_mif, PM_QOS_BUS_THROUGHPUT, exynos_bus_table[ARRAY_SIZE(apll_freq) - 1]);
+		pm_qos_add_request(&cluster_qos_max[CL_ZERO], PM_QOS_CLUSTER0_FREQ_MAX, apll_freq[0].freq / 1000);
 #ifndef CONFIG_EXYNOS7580_QUAD
 		pm_qos_add_request(&cluster_qos_max[CL_ONE], PM_QOS_CLUSTER1_FREQ_MAX, apll_freq[1].freq / 1000);
 		maxlock_freq = apll_freq[1].freq / 1000;
