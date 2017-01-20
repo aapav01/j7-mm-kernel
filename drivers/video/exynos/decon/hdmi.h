@@ -33,7 +33,7 @@
 #define INFOFRAME_CNT          2
 
 /* default preset configured on probe */
-#define HDMI_DEFAULT_TIMINGS_IDX (10)
+#define HDMI_DEFAULT_TIMINGS_IDX (3)
 
 #define HDMI_VSI_VERSION	0x01
 #define HDMI_AVI_VERSION	0x02
@@ -381,6 +381,9 @@ struct hdmi_device {
 
 	/** mutex for protection of fields below */
 	struct mutex mutex;
+#ifdef CONFIG_SEC_MHL_SUPPORT
+	struct switch_dev audio_ch_switch;
+#endif
 
 	/* IP version of TV driver */
 	enum tv_ip_version ip_ver;
@@ -522,5 +525,40 @@ static inline void hdmi_read_bytes(struct hdmi_device *hdev, u32 reg_id,
 	for (i = 0; i < bytes; ++i)
 		buf[i] = readb(hdev->regs + reg_id + i * 4);
 }
+
+#ifdef CONFIG_SEC_MHL_EDID
+enum extension_edid_db {
+	DATABLOCK_AUDIO = 1,
+	DATABLOCK_VIDEO,
+	DATABLOCK_VENDOR,
+	DATABLOCK_SPEAKERS,
+};
+
+enum MHL_MAX_RESOLUTION {
+	MHL_576P_50 = 1,
+	MHL_1080P_30,
+	MHL_1080P_60,
+	MHL_UHD,
+};
+
+/* MHL - TMDS Speeds */
+#define MHL_XDC_TMDS_000			0x00
+#define MHL_XDC_TMDS_150			0x01
+#define MHL_XDC_TMDS_300			0x02
+#define MHL_XDC_TMDS_600			0x04
+
+/* MHL Video Link Mode */
+#define MHL_DEV_VID_LINK_SUPP_PPIXEL        0x08
+#define MHL_DEV_VID_LINK_SUPP_16BPP     0x40
+
+/* HDMI EDID Extension Data Block Tags  */
+#define HDMI_EDID_EX_DATABLOCK_TAG_MASK		0xE0
+#define HDMI_EDID_EX_DATABLOCK_LEN_MASK		0x1F
+#define HDMI_EDID_EX_SUPPORTS_AI_MASK		0x80
+#define HDMI_AUDIO_FORMAT_MAX_LENGTH		10
+#define EDID_MAX_LENGTH	512
+
+int hdmi_send_audio_info(int onoff, struct hdmi_device *hdev);
+#endif/* CONFIG_SEC_MHL_EDID */
 
 #endif /* SAMSUNG_HDMI_H */

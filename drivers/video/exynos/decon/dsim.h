@@ -1,14 +1,18 @@
-/* linux/drivers/video/exynos_decon/dsim.h
+/*
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Header file for Samsung MIPI-DSI common driver.
- *
- * Copyright (c) 2013 Samsung Electronics
- * Haowei Li <haowei.li@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
 
 #ifndef __DSIM_H__
 #define __DSIM_H__
@@ -20,6 +24,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/workqueue.h>
 
 #include <media/v4l2-subdev.h>
 #include <media/media-entity.h>
@@ -33,6 +38,8 @@
 
 #define DSIM_RX_FIFO_READ_DONE	(0x30800002)
 #define DSIM_MAX_RX_FIFO	(64)
+
+#define AID_INTERPOLATION
 
 #define dsim_err(fmt, ...)					\
 	do {							\
@@ -55,11 +62,13 @@
 
 extern struct dsim_device *dsim0_for_decon;
 extern struct dsim_device *dsim1_for_decon;
-extern struct mipi_dsim_lcd_driver s6e3ha0_mipi_lcd_driver;
-extern struct mipi_dsim_lcd_driver s6e3ha2k_mipi_lcd_driver;
-extern struct mipi_dsim_lcd_driver s6e3hf2_mipi_lcd_driver;
-extern struct mipi_dsim_lcd_driver s6e3hf2_wqhd_mipi_lcd_driver;
-extern struct mipi_dsim_lcd_driver s6e3fa0_mipi_lcd_driver;
+
+#define PANEL_STATE_SUSPENED	0
+#define PANEL_STATE_RESUMED		1
+#define PANEL_STATE_SUSPENDING	2
+
+#define PANEL_DISCONNEDTED		0
+#define PANEL_CONNECTED			1
 
 enum mipi_dsim_pktgo_state {
 	DSIM_PKTGO_DISABLED,
@@ -73,6 +82,14 @@ enum dsim_state {
 	DSIM_STATE_SUSPEND	/* DSIM is suspend state */
 };
 
+#ifdef CONFIG_LCD_DOZE_MODE
+enum dsim_doze_mode {
+	DSIM_DOZE_STATE_NORMAL = 0,
+	DSIM_DOZE_STATE_DOZE,
+	DSIM_DOZE_STATE_SUSPEND,
+	DSIM_DOZE_STATE_DOZE_SUSPEND,
+};
+#endif
 struct dsim_resources {
 	struct clk *pclk;
 	struct clk *dphy_esc;
@@ -81,16 +98,110 @@ struct dsim_resources {
 	struct clk *pclk_disp;
 	int lcd_power[2];
 	int lcd_reset;
+	struct regulator *regulator_30V;
+	struct regulator *regulator_18V;
+	struct regulator *regulator_16V;
 };
 
 struct panel_private {
+
 	struct backlight_device *bd;
-	unsigned int power;
+	unsigned char id[3];
+	unsigned char code[5];
+	unsigned char elvss_set[22];
+	unsigned char tset[30];	// HA3 is 30
+	unsigned char aid[16];
+	int	temperature;
+	unsigned int coordinate[2];
+	unsigned char date[7];
 	unsigned int lcdConnected;
+	unsigned int state;
+	unsigned int br_index;
+	unsigned int acl_enable;
+	unsigned int caps_enable;
+	unsigned int current_acl;
+	unsigned int current_hbm;
+	unsigned int current_vint;
+	unsigned int siop_enable;
+#ifdef CONFIG_LCD_BURNIN_CORRECTION
+	unsigned char ldu_correction_state;
+#endif
+	void *dim_data;
+	void *dim_info;
+	unsigned int *br_tbl;
+	unsigned char *inter_aor_tbl;
+	unsigned int *gallery_br_tbl;
+	unsigned char **hbm_tbl;
+	unsigned char **acl_cutoff_tbl;
+	unsigned char **acl_opr_tbl;
+	struct mutex lock;
+	struct dsim_panel_ops *ops;
+	unsigned int panel_type;
+#ifdef CONFIG_EXYNOS_DECON_MDNIE_LITE
+	unsigned int mdnie_support;
+#endif
+
+#ifdef CONFIG_EXYNOS_DECON_LCD_MCD
+	unsigned int mcd_on;
+#endif
+
+#ifdef CONFIG_LCD_HMT
+	unsigned int hmt_on;
+	unsigned int hmt_br_index;
+	unsigned int hmt_brightness;
+	void *hmt_dim_data;
+	void *hmt_dim_info;
+	unsigned int *hmt_br_tbl;
+#endif
+
+#ifdef CONFIG_LCD_ALPM
+	unsigned int 	alpm;
+	unsigned int 	current_alpm;
+	struct mutex	alpm_lock;
+	unsigned char mtpForALPM[36];
+	unsigned char prev_VT[2];
+	unsigned char alpm_support;			// because zero2 use 2panel(ha2, hf3)
+#endif
+
+#ifdef CONFIG_LCD_DOZE_MODE
+	unsigned int 	alpm_support;	// 0 : unsupport, 1 : 30hz, 2 : 1hz
+	unsigned int	hlpm_support;	// 0 : unsupport, 1 : 30hz
+	unsigned int alpm_mode;
+	unsigned int curr_alpm_mode;
+#endif
+	unsigned int interpolation;
+	unsigned char hbm_elvss;
+
+	int is_br_override;
+	int override_br_value;
+
+	int esd_disable;
+
+	unsigned int accessibility;
+	unsigned int adaptive_control;
+	struct class *mdnie_class;
+	int lux;
+#ifdef CONFIG_CHECK_OCTA_CHIP_ID
+	unsigned char octa_id[25];
+#endif
+};
+
+struct dsim_panel_ops {
+	int (*early_probe)(struct dsim_device *dsim);
+	int	(*probe)(struct dsim_device *dsim);
+	int	(*displayon)(struct dsim_device *dsim);
+	int	(*exit)(struct dsim_device *dsim);
+	int	(*init)(struct dsim_device *dsim);
+	int (*dump)(struct dsim_device *dsim);
+#ifdef CONFIG_LCD_DOZE_MODE
+	int (*enteralpm)(struct dsim_device *dsim);
+	int (*exitalpm)(struct dsim_device *dsim);
+#endif
 };
 
 struct dsim_device {
 	struct device *dev;
+	void * decon;
 	struct dsim_resources res;
 	unsigned int irq;
 	void __iomem *reg_base;
@@ -108,7 +219,8 @@ struct dsim_device {
 	unsigned int enabled;
 	struct decon_lcd lcd_info;
 	struct dphy_timing_value	timing;
-	int				pktgo;
+	int	pktgo;
+	int	glide_display_size;
 
 	int id;
 	u32 data_lane_cnt;
@@ -121,10 +233,17 @@ struct dsim_device {
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *turnon_tes;
 	struct pinctrl_state *turnoff_tes;
+	struct mutex rdwr_lock;
 
 	struct panel_private priv;
 
 	struct dsim_clks_param clks_param;
+#ifdef CONFIG_LCD_ALPM
+	int 			alpm;
+#endif
+#ifdef CONFIG_LCD_DOZE_MODE
+	unsigned int dsim_doze;
+#endif
 };
 
 /**
@@ -136,10 +255,16 @@ struct dsim_device {
  */
 
 struct mipi_dsim_lcd_driver {
+	int (*early_probe)(struct dsim_device *dsim);
 	int	(*probe)(struct dsim_device *dsim);
 	int	(*suspend)(struct dsim_device *dsim);
 	int	(*displayon)(struct dsim_device *dsim);
 	int	(*resume)(struct dsim_device *dsim);
+	int (*dump)(struct dsim_device *dsim);
+#ifdef CONFIG_LCD_DOZE_MODE
+	int (*enteralpm)(struct dsim_device *dsim);
+	int (*exitalpm)(struct dsim_device *dsim);
+#endif
 };
 
 int dsim_write_data(struct dsim_device *dsim, unsigned int data_id,
@@ -150,6 +275,12 @@ int dsim_read_data(struct dsim_device *dsim, u32 data_id, u32 addr,
 #ifdef CONFIG_DECON_MIPI_DSI_PKTGO
 void dsim_pkt_go_ready(struct dsim_device *dsim);
 void dsim_pkt_go_enable(struct dsim_device *dsim, bool enable);
+#endif
+
+#if defined(CONFIG_LCD_ALPM) || defined(CONFIG_LCD_DOZE_MODE)
+#define	ALPM_OFF							0
+#define ALPM_ON							1
+int alpm_set_mode(struct dsim_device *dsim, int enable);
 #endif
 
 static inline struct dsim_device *get_dsim_drvdata(u32 id)
@@ -201,9 +332,6 @@ static inline void dsim_write_mask(u32 id, u32 reg_id, u32 val, u32 mask)
 	writel(val, dsim->reg_base + reg_id);
 }
 
-u32 dsim_reg_get_lineval(u32 id);
-u32 dsim_reg_get_hozval(u32 id);
-
 #define DSIM_IOC_ENTER_ULPS		_IOW('D', 0, u32)
 #define DSIM_IOC_LCD_OFF		_IOW('D', 1, u32)
 #define DSIM_IOC_PKT_GO_ENABLE		_IOW('D', 2, u32)
@@ -214,4 +342,16 @@ u32 dsim_reg_get_hozval(u32 id);
 #define DSIM_IOC_SET_PORCH		_IOW('D', 7, struct decon_lcd *)
 #define DSIM_IOC_DUMP			_IOW('D', 8, u32)
 
+#define DSIM_REQ_POWER_OFF		0
+#define DSIM_REQ_POWER_ON		1
+#ifdef CONFIG_LCD_DOZE_MODE
+#define DSIM_REQ_DOZE_MODE		2
+#define DSIM_REQ_DOZE_SUSPEND 	3
+#endif
+
+u32 dsim_reg_get_lineval(u32 id);
+u32 dsim_reg_get_hozval(u32 id);
+
+int dsim_write_hl_data(struct dsim_device *dsim, const u8 *cmd, u32 cmdSize);
+int dsim_read_hl_data(struct dsim_device *dsim, u8 addr, u32 size, u8 *buf);
 #endif /* __DSIM_H__ */

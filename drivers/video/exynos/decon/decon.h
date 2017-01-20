@@ -1,13 +1,19 @@
 /*
- * Copyright (c) 2014 Samsung Electronics Co., Ltd.
- *		http://www.samsung.com
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Header file for Exynos DECON driver
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
+
 
 #ifndef ___SAMSUNG_DECON_H__
 #define ___SAMSUNG_DECON_H__
@@ -31,6 +37,11 @@
 #include "regs-decon.h"
 #include "decon_common.h"
 #include "./panels/decon_lcd.h"
+#include "dsim.h"
+
+#if defined(CONFIG_EXYNOS_DECON_MDNIE)
+#include "./panels/mdnie.h"
+#endif
 
 extern struct ion_device *ion_exynos;
 extern struct decon_device *decon_int_drvdata;
@@ -68,7 +79,7 @@ extern int decon_log_level;
 #define DECON_TZPC_OFFSET	3
 #define DECON_ODMA_WB		8
 #define MAX_DMA_TYPE		9
-
+#define MAX_FRM_DONE_WAIT	10
 #define DISP_UTIL		70
 #define DECON_INT_UTIL		65
 #ifndef NO_CNT_TH
@@ -76,7 +87,13 @@ extern int decon_log_level;
 #define	NO_CNT_TH		10
 #endif
 
+#ifdef CONFIG_LCD_ALPM
+#define ALPM_TIMEOUT 3
+#endif
+
 #define DECON_UNDERRUN_THRESHOLD	300
+#define DECON_CRC_KEY	(0x3c879c68df96d8f3)
+#define DECON_CRC_BUF_KEY (0x12131415)
 
 #ifdef CONFIG_FB_WINDOW_UPDATE
 #define DECON_WIN_UPDATE_IDX	(7)
@@ -212,6 +229,15 @@ struct decon_resources {
 	struct clk *aclk_disp;
 	struct clk *pclk_disp;
 	struct clk *mif_pll;
+	struct clk *disp_pll;
+	struct clk *m_sclk_decon_eclk;
+	struct clk *mout_bus1_pll_top0;
+	struct clk *dout_sclk_decon_eclk;
+	struct clk *m_decon_eclk;
+	struct clk *um_decon_eclk;
+	struct clk *d_decon_eclk;
+	struct clk *m_decon_vclk;
+	struct clk *d_decon_vclk;
 };
 
 struct decon_rect {
@@ -229,6 +255,7 @@ struct decon_win {
 
 	struct decon_fb_videomode	win_mode;
 	struct decon_dma_buf_data	dma_buf_data[MAX_BUF_PLANE_CNT];
+	struct ion_handle               *handle_crc;
 	int				plane_cnt;
 	struct fb_var_screeninfo	prev_var;
 	struct fb_fix_screeninfo	prev_fix;
@@ -379,6 +406,8 @@ struct decon_win_config {
 			struct vpp_params		vpp_parm;
 			/* no read area of IDMA */
 			struct decon_win_rect		block_area;
+			struct decon_win_rect           transparent_area;
+			struct decon_win_rect           opaque_area;
 			/* source framebuffer coordinates */
 			struct decon_frame		src;
 		};
@@ -420,11 +449,13 @@ struct decon_reg_data {
 	u32				wb_whole_h;
 	struct decon_win_config		vpp_config[MAX_DECON_WIN];
 	struct decon_win_rect		block_rect[MAX_DECON_WIN];
+	int				blk_mode[MAX_DECON_WIN];
 #ifdef CONFIG_FB_WINDOW_UPDATE
 	struct decon_win_rect		update_win;
 	bool				need_update;
 #endif
 	bool				protection[MAX_DECON_WIN];
+	struct ion_handle 		*handle_crc[MAX_DECON_WIN];
 };
 
 struct decon_win_config_data {
@@ -441,6 +472,15 @@ union decon_ioctl_data {
 	struct decon_win_config_data win_data;
 	u32 vsync;
 };
+
+#ifdef CONFIG_LCD_DOZE_MODE
+enum decon_doze_mode {
+	DECON_DOZE_STATE_NORMAL = 0,
+	DECON_DOZE_STATE_DOZE,
+	DECON_DOZE_STATE_SUSPEND,
+	DECON_DOZE_STATE_DOZE_SUSPEND
+};
+#endif
 
 struct decon_underrun_stat {
 	int	prev_bw;
@@ -473,8 +513,7 @@ typedef enum disp_ss_event_type {
 	/* Related with interrupt */
 	DISP_EVT_TE_INTERRUPT,
 	DISP_EVT_UNDERRUN,
-	DISP_EVT_DECON_FRAMEDONE,
-	DISP_EVT_DSIM_FRAMEDONE,
+	DISP_EVT_FRAMEDONE,
 
 	/* Related with async event */
 	DISP_EVT_UPDATE_HANDLER,
@@ -502,6 +541,15 @@ typedef enum disp_ss_event_type {
 	DISP_EVT_EXIT_ULPS,
 
 	DISP_EVT_LINECNT_ZERO,
+	DISP_EVT_TRIG_UNMASK,
+	DISP_EVT_TE_WAIT_DONE,
+	DISP_EVT_DECON_UPDATE_WAIT_DONE,
+	DISP_EVT_PARTIAL_CMD,
+	DISP_EVT_DISP_CONF,
+	DISP_EVT_GIC_TE_ENABLE,
+	DISP_EVT_GIC_TE_DISABLE,
+	DISP_EVT_DSIM_FRAMEDONE,
+	DISP_EVT_DECON_FRAMEDONE,
 
 	/* write-back events */
 	DISP_EVT_WB_SET_BUFFER,
@@ -546,12 +594,39 @@ struct disp_log_vpp {
 	u32 id;
 	u32 start_cnt;
 	u32 done_cnt;
+	u32 cur_int;
+	u32 cur_bw;
 };
 
 /* Related with frame count */
 struct disp_frame {
 	u32 timeline;
 	u32 timeline_max;
+};
+
+typedef enum disp_esd_irq {
+	irq_no_esd = 0,
+	irq_pcd_det,
+	irq_err_fg,
+	irq_disp_det
+} disp_esd_irq_t;
+
+struct esd_protect {
+	u32 pcd_irq;
+	u32 err_irq;
+	u32 disp_det_irq;
+	u32 pcd_gpio;
+	u32 disp_det_gpio;
+	struct workqueue_struct *esd_wq;
+	struct work_struct esd_work;
+	u32	queuework_pending;
+	int irq_disable;
+	disp_esd_irq_t irq_type;
+	ktime_t when_irq_enable;
+};
+
+struct disp_log_decon_frm_done {
+	u32 val[9];
 };
 
 /**
@@ -566,6 +641,7 @@ struct disp_ss_log {
 		struct decon_update_reg_data reg;
 		struct dsim_log_cmd_buf cmd_buf;
 		struct disp_log_pm pm;
+		struct disp_log_decon_frm_done decon_sfr;
 		struct v4l2_subdev_format fmt;
 		struct disp_frame frame;
 	} data;
@@ -599,6 +675,10 @@ void DISP_SS_EVENT_LOG_WINCON(struct v4l2_subdev *sd, struct decon_reg_data *reg
 void DISP_SS_EVENT_LOG_S_FMT(struct v4l2_subdev *sd, struct v4l2_subdev_format *fmt);
 void DISP_SS_EVENT_LOG_CMD(struct v4l2_subdev *sd, u32 cmd_id, unsigned long data);
 void DISP_SS_EVENT_SHOW(struct seq_file *s, struct decon_device *decon);
+void DISP_SS_EVENT_LOG_DECON_FRAMEDONE(struct v4l2_subdev *sd,
+			struct disp_log_decon_frm_done* decon_sfr);
+void DISP_SS_EVENT_LOG_DSIM_FRAMEDONE(struct v4l2_subdev *sd,
+			struct disp_log_decon_frm_done* decon_sfr);
 void DISP_SS_EVENT_SIZE_ERR_LOG(struct v4l2_subdev *sd, struct disp_ss_size_info *info);
 #else /*!*/
 #define DISP_SS_EVENT_START(...) do { } while(0)
@@ -628,6 +708,7 @@ struct decon_device {
 	void __iomem			*sys_regs;
 	void __iomem			*eint_pend;
 	void __iomem			*eint_mask;
+	u32 					eint_pend_mask;
 	struct device			*dev;
 	struct exynos_decon_platdata	*pdata;
 	struct media_pad		pads[MAX_DECON_PADS];
@@ -639,6 +720,7 @@ struct decon_device {
 
 	struct mutex			update_regs_list_lock;
 	struct list_head		update_regs_list;
+	int				update_regs_list_cnt;
 	struct task_struct		*update_regs_thread;
 	struct kthread_worker		update_regs_worker;
 	struct kthread_work		update_regs_work;
@@ -688,6 +770,12 @@ struct decon_device {
 	atomic_t wb_done;
 
 	unsigned int			irq;
+	int				prev_buf_fd[MAX_DECON_WIN];
+	struct decon_frame		prev_src_frm[MAX_DECON_WIN];
+	struct decon_win_rect		prev_block_rect[MAX_DECON_WIN];
+	u32 				num_blk_region_calc;
+	u32				num_blk_region;
+	u32				num_idma_blk_region;
 #ifdef CONFIG_CPU_IDLE
         struct notifier_block           lpc_nb;
 #endif
@@ -710,6 +798,27 @@ struct decon_device {
 	int				eint_status;
 	struct vpp_drm_log vpp_log[MAX_VPP_LOG];
 	int log_cnt;
+	struct decon_regs_data win_regs;
+	bool	ignore_vsync;
+	struct esd_protect esd;
+#if defined(CONFIG_EXYNOS_DECON_MDNIE)
+	struct mdnie_info *mdnie;
+	struct decon_win_config_data winconfig;
+#endif
+#ifdef CONFIG_LCD_DOZE_MODE
+	unsigned int decon_doze;
+	bool vsync_backup;
+	unsigned int req_display_on;
+#endif
+	unsigned int			force_fullupdate;
+	bool				dma_block_disable;
+	bool				win_update_disable;
+	bool				lpd_disable;
+	bool				sblock_disable;
+	bool				sdma_map_disable;
+
+	int	systrace_pid;
+	void	(*tracing_mark_write)( int pid, char id, char* str1, int value );
 };
 
 static inline struct decon_device *get_decon_drvdata(u32 id)
@@ -772,6 +881,7 @@ int decon_lcd_off(struct decon_device *decon);
 int decon_enable(struct decon_device *decon);
 int decon_disable(struct decon_device *decon);
 int decon_tui_protection(struct decon_device *decon, bool tui_en);
+int decon_wait_for_vsync(struct decon_device *decon, u32 timeout);
 
 /* internal only function API */
 int decon_fb_config_eint_for_te(struct platform_device *pdev, struct decon_device *decon);
@@ -846,8 +956,25 @@ static inline bool is_cam_not_running(struct decon_device *decon)
 }
 static inline bool decon_lpd_enter_cond(struct decon_device *decon)
 {
+#if defined(CONFIG_LCD_ALPM) || defined(CONFIG_LCD_HMT) || defined(CONFIG_LCD_DOZE_MODE)
+	struct dsim_device *dsim = NULL;
+	dsim = container_of(decon->output_sd, struct dsim_device, sd);
+#endif
 	return ((atomic_read(&decon->lpd_block_cnt) <= 0) && is_cam_not_running(decon)
+#ifdef CONFIG_LCD_ALPM
+	&& (!dsim->alpm)
+#endif
+#ifdef CONFIG_LCD_HMT
+	&& (!dsim->priv.hmt_on)
+#endif
+#if defined(CONFIG_EXYNOS_DECON_MDNIE)
+	&& (decon->mdnie->auto_brightness < 6)
+#endif
+#ifdef CONFIG_LCD_DOZE_MODE
+	&& (!dsim->dsim_doze)
+#endif
 		&& (atomic_inc_return(&decon->lpd_trig_cnt) >= DECON_ENTER_LPD_CNT));
+
 }
 static inline bool decon_min_lock_cond(struct decon_device *decon)
 {
@@ -881,5 +1008,14 @@ static inline bool is_any_pending_frames(struct decon_device *decon)
 
 #define DECON_IOC_LPD_EXIT_LOCK		_IOW('L', 0, u32)
 #define DECON_IOC_LPD_UNLOCK		_IOW('L', 1, u32)
+#ifdef CONFIG_LCD_DOZE_MODE
+#define S3CFB_POWER_MODE		_IOW('F', 223, __u32)
+enum disp_pwr_mode {
+	DECON_POWER_MODE_OFF = 0,
+	DECON_POWER_MODE_DOZE,
+	DECON_POWER_MODE_NORMAL,
+	DECON_POWER_MODE_DOZE_SUSPEND,
+};
+#endif
 
 #endif /* ___SAMSUNG_DECON_H__ */

@@ -14,6 +14,7 @@
 #include <linux/module.h>
 #include <linux/clk-provider.h>
 #include <linux/clk.h>
+#include <linux/clk-private.h>
 #include <linux/of.h>
 #include <linux/exynos_iovmm.h>
 #include <linux/smc.h>
@@ -89,11 +90,17 @@ static void vpp_dump_cfw_register(void)
 
 static void vpp_dump_registers(struct vpp_dev *vpp)
 {
-	vpp_dump_cfw_register();
+	unsigned long flags;
 	dev_info(DEV, "=== VPP%d SFR DUMP ===\n", vpp->id);
 	dev_info(DEV, "start count : %d, done count : %d\n",
 			vpp->start_count, vpp->done_count);
 
+	if (!test_bit(VPP_RUNNING, &vpp->state)) {
+		dev_err(DEV, "vpp clocks are disabled\n");
+		return;
+	}
+
+	spin_lock_irqsave(&vpp->slock, flags);
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_ADDRESS, 32, 4,
 			vpp->regs, 0xB0, false);
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_ADDRESS, 32, 4,
@@ -102,6 +109,9 @@ static void vpp_dump_registers(struct vpp_dev *vpp)
 			vpp->regs + 0xA48, 0x10, false);
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_ADDRESS, 32, 4,
 			vpp->regs + 0xB00, 0xB0, false);
+
+	vpp_dump_cfw_register();
+	spin_unlock_irqrestore(&vpp->slock, flags);
 }
 
 void vpp_op_timer_handler(unsigned long arg)
@@ -365,8 +375,40 @@ static int vpp_clk_enable(struct vpp_dev *vpp)
 		dev_err(DEV, "Failed res.pclk clk enable\n");
 		goto err_1;
 	}
+
+	if (is_vpp0_series(vpp)) {
+		ret = clk_enable(vpp->res.aclk_vpp_sfw0);
+		if(ret) {
+			dev_err(DEV, "Failed res.aclk_vpp_sfw0 clk enable\n");
+			goto err_2;
+		}
+		ret = clk_enable(vpp->res.pclk_vpp_sfw0);
+		if(ret) {
+			dev_err(DEV, "Failed res.pclk_vpp_sfw0 clk enable\n");
+			goto err_3;
+		}
+	} else {
+		ret = clk_enable(vpp->res.aclk_vpp_sfw1);
+		if(ret) {
+			dev_err(DEV, "Failed res.aclk_vpp_sfw1 clk enable\n");
+			goto err_2;
+		}
+		ret = clk_enable(vpp->res.pclk_vpp_sfw1);
+		if(ret) {
+			dev_err(DEV, "Failed res.pclk_vpp_sfw1 clk enable\n");
+			goto err_3;
+		}
+	}
+
 	return 0;
 
+err_3:
+	if (is_vpp0_series(vpp))
+		clk_disable(vpp->res.aclk_vpp_sfw0);
+	else
+		clk_disable(vpp->res.aclk_vpp_sfw1);
+err_2:
+	clk_disable(vpp->res.lh_vpp);
 err_1:
 	clk_disable(vpp->res.pclk_vpp);
 err_0:
@@ -380,6 +422,13 @@ static void vpp_clk_disable(struct vpp_dev *vpp)
 	clk_disable(vpp->res.gate);
 	clk_disable(vpp->res.pclk_vpp);
 	clk_disable(vpp->res.lh_vpp);
+	if (is_vpp0_series(vpp)) {
+		clk_disable(vpp->res.aclk_vpp_sfw0);
+		clk_disable(vpp->res.pclk_vpp_sfw0);
+	} else {
+		clk_disable(vpp->res.aclk_vpp_sfw1);
+		clk_disable(vpp->res.pclk_vpp_sfw1);
+	}
 }
 
 static int vpp_init(struct vpp_dev *vpp)
@@ -443,7 +492,7 @@ static int vpp_get_min_int_lock(struct vpp_dev *vpp)
 	struct decon_win_config *config = vpp->config;
 	struct decon_frame *dst = &config->dst;
 	struct decon_device *decon = get_decon_drvdata(0);
-	u32 vclk_mic = (clk_get_rate(decon->res.vclk) / MHZ) * 2;
+	u32 vclk_mic = (u32) ((clk_get_rate(decon->res.vclk) / MHZ) * 2);
 	u32 lcd_width = decon->lcd_info->xres;
 	int ret = 0;
 
@@ -452,8 +501,8 @@ static int vpp_get_min_int_lock(struct vpp_dev *vpp)
 	if ((vpp->sc_w == MULTI_FACTOR) && (vpp->sc_h == MULTI_FACTOR)) {
 		vpp->cur_int = vclk_mic / 2 * KHZ;
 	} else {
-		u64 scale_factor = (vclk_mic * vpp->sc_w * vpp->sc_h) / 2;
-		u64 dst_factor = (dst->w * MULTI_FACTOR) / lcd_width ;
+		u64 scale_factor = ((u64) vclk_mic * vpp->sc_w * vpp->sc_h) / 2;
+		u64 dst_factor = ((u64) dst->w * MULTI_FACTOR) / lcd_width ;
 
 		vpp->cur_int = (scale_factor * dst_factor * KHZ) /
 				(MULTI_FACTOR * MULTI_FACTOR * MULTI_FACTOR);
@@ -487,7 +536,7 @@ static void vpp_get_min_mif_lock(struct vpp_dev *vpp)
 {
 	struct decon_win_config *config = vpp->config;
 	struct decon_device *decon = get_decon_drvdata(0);
-	u32 vclk_mic = (clk_get_rate(decon->res.vclk) / MHZ) * 2;
+	u32 vclk_mic = (u32) ((clk_get_rate(decon->res.vclk) / MHZ) * 2);
 	u8 bpl, rot_factor = 0;
 	u32 scale_factor = 0;
 
@@ -704,7 +753,6 @@ static int vpp_set_config(struct vpp_dev *vpp)
 	mod_timer(&vpp->op_timer, vpp->op_timer.expires);
 
 	vpp->start_count++;
-
 	vpp->update_cnt_prev = vpp->update_cnt;
 	return 0;
 err:
@@ -756,6 +804,7 @@ static long vpp_subdev_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg
 		spin_unlock_irqrestore(&vpp->slock, flags);
 		vpp_set_min_mif_lock(vpp, 0);
 		vpp_set_min_int_lock(vpp, 0);
+		pm_qos_update_request(&vpp->vpp_mif_qos, 0);
 
 		pm_runtime_put_sync(DEV);
 		dev_dbg(DEV, "vpp stop(%d)\n", vpp->id);
@@ -845,8 +894,9 @@ static struct v4l2_subdev_ops vpp_subdev_ops = {
 static int check_mdev_for_output(struct device *dev, void *id)
 {
 	struct platform_device *pdev = to_platform_device(dev);
+	unsigned int *data = (unsigned int *) id;
 
-	if (pdev->id == (enum mdev_node)id)
+	if (pdev->id == (int)(*data))
 		return -1;
 
 	return 0;
@@ -857,11 +907,12 @@ static int vpp_find_media_device(struct vpp_dev *vpp)
 	struct device_driver *driver;
 	struct device *dev;
 	struct exynos_md *md;
+	unsigned int id = MDEV_OUTPUT;
 
 	driver = driver_find(MDEV_MODULE_NAME, &platform_bus_type);
 	if (likely(driver)) {
-		dev = driver_find_device(driver, NULL,
-			(void *)MDEV_OUTPUT, check_mdev_for_output);
+		dev = driver_find_device(driver, NULL, &id,
+			check_mdev_for_output);
 		md = (struct exynos_md *)dev_get_drvdata(dev);
 		vpp->mdev = md;
 	} else {
@@ -1015,6 +1066,30 @@ static int vpp_clk_get(struct vpp_dev *vpp)
 		}
 	}
 
+	if (is_vpp0_series(vpp)) {
+		vpp->res.aclk_vpp_sfw0 = devm_clk_get(dev, "aclk_smmu_vpp_sfw0");
+		if(IS_ERR(vpp->res.aclk_vpp_sfw0 )) {
+			dev_err(dev, "vpp-%d clock aclk_smmu_vpp_sfw0 get failed\n", vpp->id);
+			return PTR_ERR(vpp->res.aclk_vpp_sfw0);
+		}
+		vpp->res.pclk_vpp_sfw0 = devm_clk_get(dev, "pclk_smmu_vpp_sfw0");
+		if(IS_ERR(vpp->res.pclk_vpp_sfw0 )) {
+			dev_err(dev, "vpp-%d clock pclk_smmu_vpp_sfw0 get failed\n", vpp->id);
+			return PTR_ERR(vpp->res.pclk_vpp_sfw0);
+		}
+	} else {
+		vpp->res.aclk_vpp_sfw1 = devm_clk_get(dev, "aclk_smmu_vpp_sfw1");
+		if(IS_ERR(vpp->res.aclk_vpp_sfw1 )) {
+			dev_err(dev, "vpp-%d clock aclk_smmu_vpp_sfw1 get failed\n", vpp->id);
+			return PTR_ERR(vpp->res.aclk_vpp_sfw1);
+		}
+		vpp->res.pclk_vpp_sfw1 = devm_clk_get(dev, "pclk_smmu_vpp_sfw1");
+		if(IS_ERR(vpp->res.pclk_vpp_sfw1 )) {
+			dev_err(dev, "vpp-%d clock pclk_smmu_vpp_sfw1 get failed\n", vpp->id);
+			return PTR_ERR(vpp->res.pclk_vpp_sfw1);
+		}
+	}
+
 	decon_clk_set_rate(dev, "d_pclk_vpp", 134 * MHZ);
 
 	ret = clk_prepare(vpp->res.gate);
@@ -1035,8 +1110,37 @@ static int vpp_clk_get(struct vpp_dev *vpp)
 		goto err_1;
 	}
 
+	if (is_vpp0_series(vpp)) {
+		ret = clk_prepare(vpp->res.aclk_vpp_sfw0);
+		if(ret < 0) {
+			dev_err(dev, "vpp-%d aclk_smmu_vpp_sfw0 clock prepare failed\n", vpp->id);
+			goto err_2;
+		}
+		ret = clk_prepare(vpp->res.pclk_vpp_sfw0);
+		if(ret < 0) {
+			dev_err(dev, "vpp-%d pclk_smmu_vpp_sfw0 clock prepare failed\n", vpp->id);
+			goto err_3;
+		}
+	} else {
+		ret = clk_prepare(vpp->res.aclk_vpp_sfw1);
+		if(ret < 0) {
+			dev_err(dev, "vpp-%d aclk_smmu_vpp_sfw1 clock prepare failed\n", vpp->id);
+			goto err_2;
+		}
+		ret = clk_prepare(vpp->res.pclk_vpp_sfw1);
+		if(ret < 0) {
+			dev_err(dev, "vpp-%d pclk_smmu_vpp_sfw1 clock prepare failed\n", vpp->id);
+			goto err_3;
+		}
+	}
 	return 0;
-
+err_3:
+	if (is_vpp0_series(vpp))
+		clk_unprepare(vpp->res.aclk_vpp_sfw0);
+	else
+		clk_unprepare(vpp->res.aclk_vpp_sfw1);
+err_2:
+	clk_unprepare(vpp->res.lh_vpp);
 err_1:
 	clk_unprepare(vpp->res.pclk_vpp);
 err_0:
@@ -1101,20 +1205,20 @@ static int vpp_probe(struct platform_device *pdev)
 	if (!vpp->regs) {
 		dev_err(DEV, "Failed to map registers\n");
 		ret = -EADDRNOTAVAIL;
-		return ret;
+		goto probe_err_kfree;
 	}
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0) {
 		dev_err(DEV, "Failed to get IRQ resource\n");
-		return irq;
+		goto probe_err_kfree;
 	}
 
 	ret = devm_request_irq(dev, irq, vpp_irq_handler,
 				0, pdev->name, vpp);
 	if (ret) {
 		dev_err(DEV, "Failed to install irq\n");
-		return ret;
+		goto probe_err_kfree;
 	}
 
 	vpp->irq = irq;
@@ -1123,19 +1227,19 @@ static int vpp_probe(struct platform_device *pdev)
 	ret = vpp_find_media_device(vpp);
 	if (ret) {
 		dev_err(DEV, "Failed find media device\n");
-		return ret;
+		goto probe_err_kfree;
 	}
 
 	ret = vpp_create_subdev(vpp);
 	if (ret) {
 		dev_err(DEV, "Failed create sub-device\n");
-		return ret;
+		goto probe_err_kfree;
 	}
 
 	ret = vpp_clk_get(vpp);
 	if (ret) {
 		dev_err(DEV, "Failed to get clk\n");
-		return ret;
+		goto probe_err_kfree;
 	}
 
 	vpp_clk_info(vpp);
@@ -1149,7 +1253,7 @@ static int vpp_probe(struct platform_device *pdev)
 	ret = iovmm_activate(dev);
 	if (ret < 0) {
 		dev_err(DEV, "failed to reactivate vmm\n");
-		return ret;
+		goto probe_err_clk_put;
 	}
 
 	setup_timer(&vpp->op_timer, vpp_op_timer_handler,
@@ -1170,7 +1274,15 @@ static int vpp_probe(struct platform_device *pdev)
 
 	dev_info(DEV, "VPP%d is probed successfully\n", vpp->id);
 
-	return 0;
+	return ret;
+
+probe_err_clk_put:
+	vpp_clk_put(vpp);
+
+probe_err_kfree:
+	kfree(vpp);
+
+	return ret;
 }
 
 static int vpp_remove(struct platform_device *pdev)

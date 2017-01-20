@@ -19,7 +19,6 @@
 #include "dsim.h"
 #include "./vpp/vpp_core.h"
 #include "decon_helper.h"
-#include "./panels/lcd_ctrl.h"
 #include <video/mipi_display.h>
 
 int decon_clk_set_parent(struct device *dev, const char *child, const char *parent)
@@ -181,6 +180,7 @@ static inline void disp_ss_event_log_dsim
 	case DISP_EVT_DSIM_RESUME:
 	case DISP_EVT_ENTER_ULPS:
 	case DISP_EVT_EXIT_ULPS:
+	case DISP_EVT_FRAMEDONE:
 		log->data.pm.pm_status = pm_runtime_active(dsim->dev);
 		log->data.pm.elapsed = ktime_sub(ktime_get(), log->time);
 		break;
@@ -226,6 +226,8 @@ static inline void disp_ss_event_log_vpp
 		log->data.vpp.id = vpp->id;
 		log->data.vpp.start_cnt = vpp->start_count;
 		log->data.vpp.done_cnt = vpp->done_count;
+		log->data.vpp.cur_int = vpp->cur_int;
+		log->data.vpp.cur_bw = vpp->cur_bw;
 		break;
 	default:
 		log->data.vpp.id = vpp->id;
@@ -281,17 +283,23 @@ void DISP_SS_EVENT_LOG(disp_ss_event_t type, struct v4l2_subdev *sd, ktime_t tim
 	case DISP_EVT_DECON_RESUME:
 	case DISP_EVT_LINECNT_ZERO:
 	case DISP_EVT_TRIG_MASK:
-	case DISP_EVT_DECON_FRAMEDONE:
 	case DISP_EVT_DECON_FRAMEDONE_WAIT:
 	case DISP_EVT_WB_SET_BUFFER:
 	case DISP_EVT_WB_SW_TRIGGER:
 	case DISP_EVT_WB_TIMELINE_INC:
 	case DISP_EVT_WB_FRAME_DONE:
+	case DISP_EVT_TRIG_UNMASK:
+	case DISP_EVT_TE_WAIT_DONE:
+	case DISP_EVT_DECON_UPDATE_WAIT_DONE:
+	case DISP_EVT_GIC_TE_ENABLE:
+	case DISP_EVT_GIC_TE_DISABLE:
+	case DISP_EVT_DECON_FRAMEDONE:
 		disp_ss_event_log_decon(type, sd, time);
 		break;
-	case DISP_EVT_DSIM_FRAMEDONE:
 	case DISP_EVT_ENTER_ULPS:
 	case DISP_EVT_EXIT_ULPS:
+	case DISP_EVT_DSIM_FRAMEDONE:
+	case DISP_EVT_FRAMEDONE:
 		disp_ss_event_log_dsim(type, sd, time);
 		break;
 	case DISP_EVT_VPP_FRAMEDONE:
@@ -315,6 +323,7 @@ void DISP_SS_EVENT_LOG(disp_ss_event_t type, struct v4l2_subdev *sd, ktime_t tim
 	case DISP_EVT_WIN_CONFIG:
 		disp_ss_event_log_decon(type, sd, time);
 		break;
+
 	case DISP_EVT_DSIM_SUSPEND:
 	case DISP_EVT_DSIM_RESUME:
 		disp_ss_event_log_dsim(type, sd, time);
@@ -372,6 +381,39 @@ void DISP_SS_EVENT_LOG_WINCON(struct v4l2_subdev *sd, struct decon_reg_data *reg
 #endif
 }
 
+void DISP_SS_EVENT_LOG_DECON_FRAMEDONE(struct v4l2_subdev *sd,
+			struct disp_log_decon_frm_done* decon_sfr)
+{
+	struct decon_device *decon = container_of(sd, struct decon_device, sd);
+	int idx = atomic_inc_return(&decon->disp_ss_log_idx) % DISP_EVENT_LOG_MAX;
+	struct disp_ss_log *log = &decon->disp_ss_log[idx];
+
+	log->time = ktime_get();
+	log->type = DISP_EVT_DECON_FRAMEDONE;
+
+	memcpy(&log->data.decon_sfr, decon_sfr, sizeof(struct disp_log_decon_frm_done));
+}
+
+void DISP_SS_EVENT_LOG_DSIM_FRAMEDONE(struct v4l2_subdev *sd,
+			struct disp_log_decon_frm_done* decon_sfr)
+{
+	struct dsim_device *dsim = container_of(sd, struct dsim_device, sd);
+	struct decon_device *decon = get_decon_drvdata(dsim->id);
+	int idx;
+	struct disp_ss_log *log;
+
+	if (!decon || IS_ERR_OR_NULL(decon->debug_event))
+		return;
+
+	idx = atomic_inc_return(&decon->disp_ss_log_idx) % DISP_EVENT_LOG_MAX;
+	log = &decon->disp_ss_log[idx];
+
+	log->time = ktime_get();
+	log->type = DISP_EVT_DSIM_FRAMEDONE;
+
+	memcpy(&log->data.decon_sfr, decon_sfr, sizeof(struct disp_log_decon_frm_done));
+}
+
 void DISP_SS_EVENT_LOG_S_FMT(struct v4l2_subdev *sd, struct v4l2_subdev_format *fmt)
 {
 	struct decon_device *decon = container_of(sd, struct decon_device, sd);
@@ -423,12 +465,14 @@ void DISP_SS_EVENT_SHOW(struct seq_file *s, struct decon_device *decon)
 	struct timeval tv;
 
 	/* TITLE */
-	seq_printf(s, "-------------------DECON%d EVENT LOGGER ----------------------\n",
-			decon->id);
-	seq_printf(s, "-- STATUS: LPD(%s) ", IS_ENABLED(CONFIG_DECON_LPD_DISPLAY)? "on":"off");
+	seq_printf(s, "-------------------DECON EVENT LOGGER ----------------------\n");
+	seq_printf(s, "-- STATUS: LPD(%s) ",
+			IS_ENABLED(CONFIG_DECON_LPD_DISPLAY) && (!decon->lpd_disable) ? "on":"off");
 	seq_printf(s, "PKTGO(%s) ", IS_ENABLED(CONFIG_DECON_MIPI_DSI_PKTGO)? "on":"off");
-	seq_printf(s, "BlockMode(%s) ", IS_ENABLED(CONFIG_DECON_BLOCKING_MODE)? "on":"off");
-	seq_printf(s, "Window_Update(%s)\n", IS_ENABLED(CONFIG_FB_WINDOW_UPDATE)? "on":"off");
+	seq_printf(s, "BlockMode(%s) ",
+			IS_ENABLED(CONFIG_DECON_BLOCKING_MODE) && (!decon->dma_block_disable) ? "on":"off");
+	seq_printf(s, "Window_Update(%s)\n",
+			IS_ENABLED(CONFIG_FB_WINDOW_UPDATE) && (!decon->win_update_disable) ? "on":"off");
 	seq_printf(s, "-------------------------------------------------------------\n");
 	seq_printf(s, "%14s  %20s  %20s\n",
 		"Time", "Event ID", "Remarks");
@@ -478,7 +522,7 @@ void DISP_SS_EVENT_SHOW(struct seq_file *s, struct decon_device *decon)
 		case DISP_EVT_UNDERRUN:
 			seq_printf(s, "%20s  %20s", "UNDER_RUN", "-\n");
 			break;
-		case DISP_EVT_DSIM_FRAMEDONE:
+		case DISP_EVT_FRAMEDONE:
 			seq_printf(s, "%20s  %20s", "FRAME_DONE", "-\n");
 			break;
 		case DISP_EVT_UPDATE_HANDLER:
@@ -573,11 +617,14 @@ void DISP_SS_EVENT_SHOW(struct seq_file *s, struct decon_device *decon)
 void DISP_SS_EVENT_SIZE_ERR_LOG(struct v4l2_subdev *sd, struct disp_ss_size_info *info)
 {
 	struct decon_device *decon = container_of(sd, struct decon_device, sd);
-	int idx = (decon->disp_ss_size_log_idx++) % DISP_EVENT_SIZE_ERR_MAX;
-	struct disp_ss_size_err_info *log = &decon->disp_ss_size_log[idx];
+	int idx;
+	struct disp_ss_size_err_info *log;
 
 	if (!decon)
 		return;
+
+	idx = (decon->disp_ss_size_log_idx++) % DISP_EVENT_SIZE_ERR_MAX;
+	log = &decon->disp_ss_size_log[idx];
 
 	log->time = ktime_get();
 	memcpy(&log->info, info, sizeof(struct disp_ss_size_info));

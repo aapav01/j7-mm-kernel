@@ -1,14 +1,19 @@
-/* linux/drivers/video/decon_display/dsim_reg_5430.c
+/*
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Copyright 2013-2015 Samsung Electronics
- *      Jiun Yu <jiun.yu@samsung.com>
- *
- * Jiun Yu <jiun.yu@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
+
 
 /* use this definition when you test CAL on firmware */
 /* #define FW_TEST */
@@ -382,8 +387,8 @@ void dsim_reg_set_porch(u32 id, struct decon_lcd *lcd)
 		width = lcd->xres;
 
 	/* TODO: will be added SHADOW_EN in EVT1 */
-	val = DSIM_MDRESOL_VRESOL(lcd->yres) | DSIM_MDRESOL_HRESOL(width) | DSIM_MDRESOL_SHADOW_EN;
-	mask = DSIM_MDRESOL_VRESOL_MASK | DSIM_MDRESOL_HRESOL_MASK | DSIM_MDRESOL_SHADOW_EN;
+	val = DSIM_MDRESOL_VRESOL(lcd->yres) | DSIM_MDRESOL_HRESOL(width);
+	mask = DSIM_MDRESOL_VRESOL_MASK | DSIM_MDRESOL_HRESOL_MASK;
 	dsim_write_mask(id, DSIM_MDRESOL, val, mask);
 }
 
@@ -506,8 +511,8 @@ void dsim_reg_force_dphy_stop_state(u32 id, u32 en)
 
 void dsim_reg_wr_tx_header(u32 id, u32 data_id, unsigned long data0, u32 data1)
 {
-	u32 val = DSIM_PKTHDR_ID(data_id) | DSIM_PKTHDR_DATA0(data0) |
-		DSIM_PKTHDR_DATA1(data1);
+	u32 val = (u32) (DSIM_PKTHDR_ID(data_id) | DSIM_PKTHDR_DATA0(data0) |
+		DSIM_PKTHDR_DATA1(data1));
 
 	dsim_write(id, DSIM_PKTHDR, val);
 }
@@ -615,6 +620,7 @@ void dsim_reg_set_standby(u32 id, struct decon_lcd *lcd, u32 en)
 			DSIM_MDRESOL_HRESOL_MASK;
 	}
 
+	//dsim_info("%s: val(0x%x), mask(0x%x)\n", __func__, val, mask);
 	dsim_write_mask(id, DSIM_MDRESOL, val, mask);
 }
 
@@ -1104,3 +1110,11 @@ u32 dsim_reg_get_hozval(u32 id)
 	u32 val = dsim_read(id, DSIM_MDRESOL);
 	return DSIM_MDRESOL_HOZVAL_GET(val);
 }
+
+void dsim_reg_enable_byte_clock(u32 id, u32 en)
+{
+	u32 val = en ? ~0 : 0;
+
+	dsim_write_mask(id, DSIM_CLKCTRL, val, DSIM_CLKCTRL_BYTECLK_EN);
+}
+

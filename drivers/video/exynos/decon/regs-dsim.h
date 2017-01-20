@@ -1,14 +1,19 @@
-/* drivers/video/decon_display/regs-dsim.h
+/*
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Register definition file for Samsung MIPI-DSIM driver
- *
- * Copyright (c) 2014 Samsung Electronics
- * Jiun Yu <jiun.yu@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
+
 
 #ifndef _REGS_DSIM_H
 #define _REGS_DSIM_H
@@ -139,6 +144,12 @@
 
 /* Read FIFO register */
 #define DSIM_RXFIFO				(0x44)
+
+/* SFR control Register for Stanby & Shadow*/
+#define DSIM_SFR_CTRL				(0x48)
+#define DSIM_SFR_CTRL_STANDBY			(1 << 4)
+#define DSIM_SFR_CTRL_SHADOW_UPDATE		(1 << 1)
+#define DSIM_SFR_CTRL_SHADOW_EN			(1 << 0)
 
 /* FIFO status and control register */
 #define DSIM_FIFOCTRL				(0x4C)

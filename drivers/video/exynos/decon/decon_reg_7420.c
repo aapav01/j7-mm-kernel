@@ -1,14 +1,18 @@
-/* linux/drivers/video/exynos/decon/decon_reg_7420.c
+/*
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Copyright 2013-2015 Samsung Electronics
- *      Jiun Yu <jiun.yu@samsung.com>
- *
- * Jiun Yu <jiun.yu@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
 
 /* use this definition when you test CAL on firmware */
 /* #define FW_TEST */
@@ -170,6 +174,12 @@ void decon_reg_set_linecnt_op_threshold(u32 id, int dsi_idx, u32 th)
 	decon_write(id, LINECNT_OP_THRESHOLD(dsi_idx), th);
 }
 
+void decon_reg_set_eclk_auto_gate(u32 id, u32 en)
+{
+	u32 val = en ? ~0 : 0;
+	decon_write_mask(id, VCLKCON0, val, VCLKCON0_ECLK_IDLE_GATE_EN);
+}
+
 void decon_reg_set_clkval(u32 id, u32 clkdiv)
 {
 	decon_write_mask(id, VCLKCON0, ~0, VCLKCON0_CLKVALUP);
@@ -234,8 +244,8 @@ void decon_reg_configure_lcd(u32 id, enum decon_dsi_mode dsi_mode,
 			decon_reg_set_linecnt_op_threshold(id, 1, lcd_info->yres - 1);
 	}
 
+	decon_reg_set_eclk_auto_gate(id, true);
 	decon_reg_set_clkval(id, 0);
-
 	decon_reg_set_freerun_mode(id, 1);
 	decon_reg_direct_on_off(id, 0);
 }
@@ -529,8 +539,8 @@ void decon_reg_init_probe(u32 id, enum decon_dsi_mode dsi_mode, struct decon_ini
 			decon_reg_set_linecnt_op_threshold(id, 1, lcd_info->yres - 1);
 	}
 
+	decon_reg_set_eclk_auto_gate(id, true);
 	decon_reg_set_clkval(id, 0);
-
 	decon_reg_set_freerun_mode(id, 0);
 	decon_reg_update_standalone(id);
 
@@ -595,6 +605,10 @@ void decon_reg_set_regs_data(u32 id, int win_idx, struct decon_regs_data *regs)
 	regs->wincon |= WINCON_BUF_MODE_TRIPLE;
 	decon_write(id, WINCON(win_idx), regs->wincon);
 	decon_write(id, WIN_MAP(win_idx), regs->winmap);
+	if (regs->winmap & WIN_MAP_MAP) {
+		decon_write_mask(id, WINCHMAP0, WINCHMAP_DMA(0x7, win_idx),
+				WINCHMAP_MASK(win_idx));
+	}
 
 	decon_write(id, VIDOSD_A(win_idx), regs->vidosd_a);
 	decon_write(id, VIDOSD_B(win_idx), regs->vidosd_b);
@@ -668,15 +682,20 @@ int decon_reg_wait_for_update_timeout(u32 id, unsigned long timeout)
 {
 	unsigned long delay_time = 100;
 	unsigned long cnt = timeout / delay_time;
+	struct decon_device *decon = get_decon_drvdata(id);
 
-	while ((decon_read(id, DECON_UPDATE) & DECON_UPDATE_STANDALONE_F) && --cnt)
+	while ((decon_read(id, DECON_UPDATE) & DECON_UPDATE_STANDALONE_F) && --cnt) {
+		if (decon->pdata->psr_mode == DECON_MIPI_COMMAND_MODE) {
+			if (decon->ignore_vsync)
+				goto wait_exit;
+		}
 		udelay(delay_time);
-
+	}
 	if (!cnt) {
 		decon_err("timeout of updating decon registers\n");
 		return -EBUSY;
 	}
-
+wait_exit:
 	return 0;
 }
 

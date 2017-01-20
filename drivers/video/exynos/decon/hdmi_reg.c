@@ -2564,9 +2564,11 @@ void hdmi_audio_enable(struct hdmi_device *hdev, int on)
 			return;
 		hdmi_write_mask(hdev, HDMI_CON_0, ~0, HDMI_ASP_ENABLE);
 		hdmi_write_mask(hdev, HDMI_CON_0, 0, HDMI_CON_0_MASK);
+		pr_err("%s hdmi audio enable\n", __func__);
 	} else {
 		hdmi_write_mask(hdev, HDMI_CON_0, 0, HDMI_ASP_ENABLE);
 		hdmi_write_mask(hdev, HDMI_CON_0, 0, HDMI_CON_0_MASK);
+		pr_err("%s hdmi audio disable\n", __func__);
 	}
 }
 

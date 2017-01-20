@@ -60,6 +60,10 @@ struct vpp_resources {
 	struct clk *lh_vpp;
 	struct clk *d_pclk_vpp;
 	struct clk *pclk_vpp;
+	struct clk *aclk_vpp_sfw0;
+	struct clk *aclk_vpp_sfw1;
+	struct clk *pclk_vpp_sfw0;
+	struct clk *pclk_vpp_sfw1;
 };
 
 struct vpp_fraction {

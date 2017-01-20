@@ -436,6 +436,11 @@ int hdmi_s_ctrl(struct v4l2_subdev *sd, struct v4l2_control *ctrl)
 		hdev->hdcp_info.hdcp_enable = ctrl->value;
 		dev_dbg(hdev->dev, "HDCP %s\n",
 				ctrl->value ? "enable" : "disable");
+#ifdef CONFIG_SEC_MHL_HDCP
+		hdev->hdcp_info.hdcp_enable = false;
+		/*MHL8240 control the HDCP*/
+		dev_dbg(hdev->dev, "MHL control the HDCP\n");
+#endif
 		break;
 	default:
 		dev_err(dev, "invalid control id\n");
@@ -822,6 +827,9 @@ irqreturn_t hdmi_irq_handler_ext(int irq, void *dev_data)
 static void hdmi_hpd_changed(struct hdmi_device *hdev, int state)
 {
 	int ret;
+#ifdef CONFIG_SEC_MHL_SUPPORT
+	u32 audio_info = 0;
+#endif
 
 	if (state == switch_get_state(&hdev->hpd_switch))
 		return;
@@ -841,6 +849,18 @@ static void hdmi_hpd_changed(struct hdmi_device *hdev, int state)
 	switch_set_state(&hdev->hpd_switch, state);
 
 	dev_info(hdev->dev, "%s\n", state ? "plugged" : "unplugged");
+
+#ifdef CONFIG_SEC_MHL_SUPPORT
+	if (state) {
+		/*Audio CH event*/
+		audio_info = edid_audio_informs(hdev);
+		pr_err("[HDMI] send audio_info :: %x\n", audio_info);
+		switch_set_state(&hdev->audio_ch_switch, (int)audio_info);
+
+	} else {
+		switch_set_state(&hdev->audio_ch_switch, -1);
+	}
+#endif
 }
 
 static void hdmi_hpd_work_ext(struct work_struct *work)
@@ -898,6 +918,8 @@ int hdmi_set_gpio(struct hdmi_device *hdev)
 			gpio_direction_input(res->gpio_hpd);
 			dev_info(dev, "success request GPIO for hdmi-hpd\n");
 		}
+
+#ifndef CONFIG_SEC_MHL_SUPPORT
 		/* Level shifter */
 		res->gpio_ls = of_get_gpio(dev->of_node, 1);
 		if (res->gpio_ls < 0) {
@@ -926,6 +948,7 @@ int hdmi_set_gpio(struct hdmi_device *hdev)
 			gpio_set_value(res->gpio_dcdc, 1);
 			dev_info(dev, "success request GPIO for hdmi-dcdc\n");
 		}
+#endif
 	}
 
 	return ret;
@@ -1099,15 +1122,25 @@ static int hdmi_probe(struct platform_device *pdev)
 	dev_info(dev, "success register switch device\n");
 
 	/* External hpd */
-	hdmi_dev->ext_irq = gpio_to_irq(hdmi_dev->res.gpio_hpd);
-	ret = devm_request_irq(dev, hdmi_dev->ext_irq, hdmi_irq_handler_ext,
-			IRQ_TYPE_EDGE_BOTH, "hdmi-ext", hdmi_dev);
-	if (ret) {
-		dev_err(dev, "request ext interrupt failed.\n");
-		goto fail_switch;
-	} else {
-		dev_info(dev, "success request hdmi-ext irq\n");
+	if (hdmi_dev->res.gpio_hpd) {
+		hdmi_dev->ext_irq = gpio_to_irq(hdmi_dev->res.gpio_hpd);
+		ret = devm_request_irq(dev, hdmi_dev->ext_irq, hdmi_irq_handler_ext,
+				IRQ_TYPE_EDGE_BOTH, "hdmi-ext", hdmi_dev);
+		if (ret) {
+			dev_err(dev, "request ext interrupt failed.\n");
+			goto fail_switch;
+		} else {
+			dev_info(dev, "success request hdmi-ext irq\n");
+		}
 	}
+#ifdef CONFIG_SEC_MHL_SUPPORT
+	hdmi_dev->audio_ch_switch.name = "ch_hdmi_audio";
+	ret  = switch_dev_register(&hdmi_dev->audio_ch_switch);
+	if (ret) {
+		dev_err(dev, "request hdmi_audio_switch class failed.\n");
+		goto fail_switch;
+	}
+#endif
 
 	mutex_init(&hdmi_dev->mutex);
 	hdmi_dev->cur_timings =

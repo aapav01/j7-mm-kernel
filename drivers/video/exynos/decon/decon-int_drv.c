@@ -1,13 +1,19 @@
 /*
- * Copyright (c) 2014 Samsung Electronics Co., Ltd.
- *		http://www.samsung.com
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Core file for Samsung EXYNOS DECON driver
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
+
 
 #include <linux/of_gpio.h>
 #include <linux/of.h>
@@ -116,7 +122,9 @@ irqreturn_t decon_int_irq_handler(int irq, void *dev_data)
 //		s3c_fb_log_fifo_underflow_locked(decon, timestamp);
 	}
 	if (irq_sts_reg & VIDINTCON1_INT_I80) {
+		/* decon framedone */
 		DISP_SS_EVENT_LOG(DISP_EVT_DECON_FRAMEDONE, &decon->sd, ktime_set(0, 0));
+
 		decon_write_mask(decon->id, VIDINTCON1, ~0, VIDINTCON1_INT_I80);
 		decon->frame_done_cnt_cur++;
 		wake_up_interruptible_all(&decon->wait_frmdone);
@@ -186,6 +194,61 @@ int decon_int_get_clocks(struct decon_device *decon)
 		return -ENODEV;
 	}
 
+	decon->res.disp_pll = clk_get(decon->dev, "disp_pll");
+	if (IS_ERR_OR_NULL(decon->res.disp_pll)) {
+		decon_err("failed to get disp_pll\n");
+		return -ENODEV;
+	}
+
+	decon->res.m_sclk_decon_eclk = clk_get(decon->dev, "m_sclk_decon0_eclk");
+	if (IS_ERR_OR_NULL(decon->res.m_sclk_decon_eclk)) {
+		decon_err("failed to get m_sclk_decon0_eclk\n");
+		return -ENODEV;
+	}
+
+	decon->res.mout_bus1_pll_top0 = clk_get(decon->dev, "mout_bus1_pll_top0");
+	if (IS_ERR_OR_NULL(decon->res.mout_bus1_pll_top0)) {
+		decon_err("failed to get mout_bus1_pll_top0\n");
+		return -ENODEV;
+	}
+
+	decon->res.dout_sclk_decon_eclk = clk_get(decon->dev,
+			"dout_sclk_decon_int_eclk");
+	if (IS_ERR_OR_NULL(decon->res.dout_sclk_decon_eclk)) {
+		decon_err("failed to get dout_sclk_decon_int_eclk\n");
+		return -ENODEV;
+	}
+
+	decon->res.m_decon_eclk = clk_get(decon->dev, "m_decon0_eclk");
+	if (IS_ERR_OR_NULL(decon->res.m_decon_eclk)) {
+		decon_err("failed to get m_decon0_eclk\n");
+		return -ENODEV;
+	}
+
+	decon->res.um_decon_eclk = clk_get(decon->dev, "um_decon0_eclk");
+	if (IS_ERR_OR_NULL(decon->res.um_decon_eclk)) {
+		decon_err("failed to get um_decon0_eclk\n");
+		return -ENODEV;
+	}
+
+	decon->res.d_decon_eclk = clk_get(decon->dev, "d_decon0_eclk");
+	if (IS_ERR_OR_NULL(decon->res.d_decon_eclk)) {
+		decon_err("failed to get d_decon0_eclk\n");
+		return -ENODEV;
+	}
+
+	decon->res.m_decon_vclk = clk_get(decon->dev, "m_decon0_vclk");
+	if (IS_ERR_OR_NULL(decon->res.m_decon_vclk)) {
+		decon_err("failed to get m_decon0_vclk\n");
+		return -ENODEV;
+	}
+
+	decon->res.d_decon_vclk = clk_get(decon->dev, "d_decon0_vclk");
+	if (IS_ERR_OR_NULL(decon->res.d_decon_vclk)) {
+		decon_err("failed to get d_decon0_vclk\n");
+		return -ENODEV;
+	}
+
 	return 0;
 }
 
@@ -207,19 +270,22 @@ void decon_int_set_clocks(struct decon_device *decon)
 		break;
 	case (2560 * 1440):
 		/* NOTE: DPLL, ACLK_DISP_400 & PCLK_DISP must be set by boot loader */
-		decon_clk_set_rate(dev, "disp_pll", 127 * MHZ);
-		decon_clk_set_parent(dev, "m_sclk_decon0_eclk", "mout_bus1_pll_top0");
-		decon_clk_set_rate(dev, "dout_sclk_decon_int_eclk", 168 * MHZ);
-		decon_clk_set_parent(dev, "m_decon0_eclk", "um_decon0_eclk");
-		decon_clk_set_rate(dev, "d_decon0_eclk", 168 * MHZ);
-		decon_clk_set_parent(dev, "m_decon0_vclk", "disp_pll");
-		decon_clk_set_rate(dev, "d_decon0_vclk", 127 * MHZ);
+		clk_set_rate(decon->res.disp_pll, 127 * MHZ);
+		clk_set_parent(decon->res.m_sclk_decon_eclk,
+				decon->res.mout_bus1_pll_top0);
+		clk_set_rate(decon->res.dout_sclk_decon_eclk, 168 * MHZ);
+		clk_set_parent(decon->res.m_decon_eclk, decon->res.um_decon_eclk);
+		clk_set_rate(decon->res.d_decon_eclk, 168 * MHZ);
+		clk_set_parent(decon->res.m_decon_vclk, decon->res.disp_pll);
+		clk_set_rate(decon->res.d_decon_vclk, 127 * MHZ);
 		break;
 	case (1920 * 1080):
 		/* NOTE: DPLL, ACLK_DISP_400 & PCLK_DISP must be set by boot loader */
+#ifdef CONFIG_EXYNOS_DECON_DUAL_DSI
 		decon_clk_set_rate(dev, "disp_pll", 267 * MHZ);
 		decon_clk_set_parent(dev, "m_sclk_decon0_eclk", "mout_bus1_pll_top0");
 		decon_clk_set_rate(dev, "dout_sclk_decon_int_eclk", 100 * MHZ);
+
 		decon_clk_set_parent(dev, "m_decon0_eclk", "um_decon0_eclk");
 		decon_clk_set_rate(dev, "d_decon0_eclk", 100 * MHZ);
 		decon_clk_set_parent(dev, "m_decon0_vclk", "disp_pll");
@@ -228,6 +294,15 @@ void decon_int_set_clocks(struct decon_device *decon)
 		} else {
 			decon_clk_set_rate(dev, "d_decon0_vclk", 72 * MHZ);
 		}
+#else
+		decon_clk_set_rate(dev, "disp_pll", 142 * MHZ);
+		decon_clk_set_parent(dev, "m_sclk_decon0_eclk", "mout_bus1_pll_top0");
+		decon_clk_set_rate(dev, "dout_sclk_decon_int_eclk", 100 * MHZ);
+		decon_clk_set_parent(dev, "m_decon0_eclk", "um_decon0_eclk");
+		decon_clk_set_rate(dev, "d_decon0_eclk", 100 * MHZ);
+		decon_clk_set_parent(dev, "m_decon0_vclk", "disp_pll");
+		decon_clk_set_rate(dev, "d_decon0_vclk", 142 * MHZ);
+#endif
 		break;
 	default:
 		/* NOTE: DPLL, ACLK_DISP_400 & PCLK_DISP must be set by boot loader */
@@ -380,7 +455,7 @@ static u32 wincon(u32 bits_per_pixel, u32 transp_length)
 	case 32:
 		if (transp_length > 0) {
 			data |= WINCON_BLD_PIX;
-			data |= WINCON_BPPMODE_ARGB8888;
+			data |= WINCON_BPPMODE_ABGR8888;
 		} else {
 			data |= WINCON_BPPMODE_XRGB8888;
 		}
@@ -401,19 +476,16 @@ int decon_set_par(struct fb_info *info)
 	struct fb_var_screeninfo *var = &info->var;
 	struct decon_win *win = info->par;
 	struct decon_device *decon = win->decon;
-	struct decon_regs_data win_regs;
 	int win_no = win->index;
+	struct decon_regs_data *win_regs;
 
-	memset(&win_regs, 0, sizeof(struct decon_regs_data));
+
+	win_regs = &decon->win_regs;
+	memset(win_regs, 0, sizeof(struct decon_regs_data));
 	dev_info(decon->dev, "setting framebuffer parameters\n");
 
 	if (decon->state == DECON_STATE_OFF)
 		return 0;
-
-	decon_lpd_block_exit(decon);
-
-	decon_reg_shadow_protect_win(decon->id, win->index, 1);
-
 	info->fix.visual = fb_visual(var->bits_per_pixel, 0);
 
 	info->fix.line_length = fb_linelength(var->xres_virtual,
@@ -421,34 +493,24 @@ int decon_set_par(struct fb_info *info)
 	info->fix.xpanstep = fb_panstep(var->xres, var->xres_virtual);
 	info->fix.ypanstep = fb_panstep(var->yres, var->yres_virtual);
 
-	if (decon_reg_is_win_enabled(decon->id, win_no))
-		win_regs.wincon = WINCON_ENWIN;
-	else
-		win_regs.wincon = 0;
-
-	win_regs.wincon |= wincon(var->bits_per_pixel, var->transp.length);
-	win_regs.winmap = 0x0;
-	win_regs.vidosd_a = vidosd_a(0, 0);
-	win_regs.vidosd_b = vidosd_b(0, 0, var->xres, var->yres);
-	win_regs.vidosd_c = vidosd_c(0x0, 0x0, 0x0);
-	win_regs.vidosd_d = vidosd_d(0xff, 0xff, 0xff);
-	win_regs.vidw_buf_start = info->fix.smem_start;
-	win_regs.vidw_whole_w = var->xoffset + var->width;
-	win_regs.vidw_whole_h = var->yoffset + var->height;
-	win_regs.vidw_offset_x = var->xoffset;
-	win_regs.vidw_offset_y = var->yoffset;
+	win_regs->wincon = WINCON_ENWIN;
+	win_regs->wincon |= wincon(var->bits_per_pixel, var->transp.length);
+	win_regs->winmap = 0x0;
+	win_regs->vidosd_a = vidosd_a(0, 0);
+	win_regs->vidosd_b = vidosd_b(0, 0, var->xres, var->yres);
+	win_regs->vidosd_c = vidosd_c(0x0, 0x0, 0x0);
+	win_regs->vidosd_d = vidosd_d(0xff, 0xff, 0xff);
+	win_regs->vidw_buf_start = info->fix.smem_start;
+	win_regs->vidw_whole_w = var->xres;
+	win_regs->vidw_whole_h = var->yres;
+	win_regs->vidw_offset_x = 0;
+	win_regs->vidw_offset_y = 0;
 	if (win_no)
-		win_regs.blendeq = BLENDE_A_FUNC(BLENDE_COEF_ONE) |
+		win_regs->blendeq = BLENDE_A_FUNC(BLENDE_COEF_ONE) |
 			BLENDE_B_FUNC(BLENDE_COEF_ZERO) |
 			BLENDE_P_FUNC(BLENDE_COEF_ZERO) |
 			BLENDE_Q_FUNC(BLENDE_COEF_ZERO);
-	win_regs.type = IDMA_G0;
-	decon_reg_set_regs_data(decon->id, win_no, &win_regs);
-
-	decon_reg_shadow_protect_win(decon->id, win->index, 0);
-
-	decon_reg_update_standalone(decon->id);
-	decon_lpd_unblock(decon);
+	win_regs->type = IDMA_G0;
 
 	return 0;
 }
@@ -610,14 +672,17 @@ static void decon_activate_window_dma(struct decon_device *decon, unsigned int i
 
 int decon_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 {
+	int ret = 0;
 	struct decon_win *win = info->par;
 	struct decon_device *decon = win->decon;
 	unsigned int start_boff, end_boff;
-	int ret = 0;
+
+
+	if (decon->state == DECON_STATE_OFF)
+		return ret;
+
 
 	decon_lpd_block_exit(decon);
-
-	decon_set_par(info);
 
 	/* Offset in bytes to the start of the displayed area */
 	start_boff = var->yoffset * info->fix.line_length;
@@ -648,31 +713,36 @@ int decon_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 	 * both start and end addresses are updated to prevent corruption */
 	decon_reg_shadow_protect_win(decon->id, win->index, 1);
 
-	decon_activate_window_dma(decon, win->index);
-	decon_reg_activate_window(decon->id, win->index);
+	decon_reg_set_regs_data(decon->id, win->index, &decon->win_regs);
 
 	writel(info->fix.smem_start + start_boff, decon->regs + VIDW_ADD0(win->index));
-	//writel(info->fix.smem_start + end_boff, buf + sfb->variant.buf_end);
 
 	decon_reg_shadow_protect_win(decon->id, win->index, 0);
 
-#ifdef CONFIG_FB_I80_COMMAND_MODE
-	decon_reg_set_trigger(decon->id, decon->pdata->dsi_mode,
-			decon->pdata->trig_mode, DECON_TRIG_ENABLE);
-#ifdef CONFIG_DECON_MIPI_DSI_PKTGO
+	decon_reg_activate_window(decon->id, win->index);
+	decon_activate_window_dma(decon, win->index);
 
-	if (v4l2_subdev_call(decon->output_sd, core, ioctl, DSIM_IOC_PKT_GO_ENABLE, NULL))
-		decon_err("Failed to call DSIM packet go enable!\n");
-#endif
-	decon_reg_set_trigger(decon->id, decon->pdata->dsi_mode,
-			decon->pdata->trig_mode, DECON_TRIG_DISABLE);
-#endif
+	if (decon->pdata->trig_mode == DECON_HW_TRIG)
+		decon_reg_set_trigger(decon->id, decon->pdata->dsi_mode,
+			decon->pdata->trig_mode, DECON_TRIG_ENABLE);
+
+	ret = decon_wait_for_vsync(decon, VSYNC_TIMEOUT_MSEC);
+	if (ret) {
+		decon_err("%s:vsync time over\n", __func__);
+		goto pan_display_exit;
+	}
 
 pan_display_exit:
-        decon_lpd_unblock(decon);
+	if (decon->pdata->trig_mode == DECON_HW_TRIG)
+		decon_reg_set_trigger(decon->id, decon->pdata->dsi_mode,
+			decon->pdata->trig_mode, DECON_TRIG_DISABLE);
+
+	decon_lpd_unblock(decon);
 	return ret;
 }
 EXPORT_SYMBOL(decon_pan_display);
+
+
 
 int decon_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
@@ -778,6 +848,9 @@ irqreturn_t decon_fb_isr_for_eint(int irq, void *dev_id)
 
 	spin_lock(&decon->slock);
 
+	decon->vsync_info.timestamp = timestamp;
+	wake_up_interruptible_all(&decon->vsync_info.wait);
+
 	if (decon->pdata->trig_mode == DECON_SW_TRIG) {
 		decon_reg_set_trigger(decon->id, decon->pdata->dsi_mode,
 				decon->pdata->trig_mode, DECON_TRIG_ENABLE);
@@ -809,8 +882,7 @@ irqreturn_t decon_fb_isr_for_eint(int irq, void *dev_id)
 		}
 	}
 #endif
-	decon->vsync_info.timestamp = timestamp;
-	wake_up_interruptible_all(&decon->vsync_info.wait);
+
 
 	spin_unlock(&decon->slock);
 
@@ -970,7 +1042,22 @@ u32 decon_reg_get_cam_status(void __iomem *cam_status)
 	else
 		return 0xF;
 }
+#ifdef CONFIG_DECON_LPD_DISPLAY
+bool static decon_has_drm(struct decon_device *decon)
+{
+	if (decon->prev_protection_bitmask ||
+		decon->cur_protection_bitmask)
+		return true;
 
+	if (decon_ext_drvdata) {
+		if (decon_ext_drvdata->prev_protection_bitmask ||
+				decon_ext_drvdata->cur_protection_bitmask)
+			return true;
+	}
+
+	return false;
+}
+#endif
 static int decon_enter_lpd(struct decon_device *decon)
 {
 	int ret = 0;
@@ -991,11 +1078,15 @@ static int decon_enter_lpd(struct decon_device *decon)
 		goto err;
 	}
 
+	if (decon_has_drm(decon))
+		goto err;
+
 	exynos_ss_printk("%s +\n", __func__);
 	decon_lpd_trig_reset(decon);
 	decon->state = DECON_STATE_LPD_ENT_REQ;
 	decon_disable(decon);
 	decon->state = DECON_STATE_LPD;
+	decon->tracing_mark_write( decon->systrace_pid, 'C', "decon_LPD", 1 );
 	exynos_ss_printk("%s -\n", __func__);
 
 	DISP_SS_EVENT_LOG(DISP_EVT_ENTER_LPD, &decon->sd, start);
@@ -1029,6 +1120,7 @@ int decon_exit_lpd(struct decon_device *decon)
 	decon_enable(decon);
 	decon_lpd_trig_reset(decon);
 	decon->state = DECON_STATE_ON;
+	decon->tracing_mark_write( decon->systrace_pid, 'C', "decon_LPD", 0 );
 	exynos_ss_printk("%s -\n", __func__);
 
 	DISP_SS_EVENT_LOG(DISP_EVT_EXIT_LPD, &decon->sd, start);
@@ -1085,6 +1177,9 @@ static void decon_int_lpd_handler(struct work_struct *work)
 {
 	struct decon_device *decon =
 			container_of(work, struct decon_device, lpd_work);
+
+	if (decon->lpd_disable)
+		return;
 
 	if (decon_lpd_enter_cond(decon)) {
 		decon_enter_lpd(decon);

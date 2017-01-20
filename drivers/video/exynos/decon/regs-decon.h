@@ -1,15 +1,18 @@
 /*
- * drivers/video/exynos/decon/regs-decon.h
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Register definition file for Samsung DECON driver
- *
- * Copyright (c) 2014 Samsung Electronics
- * Jiun Yu <jiun.yu@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
 
 #ifndef _REGS_DECON_H
 #define _REGS_DECON_H
@@ -41,6 +44,7 @@
 #define VIDOUTCON0_WB_F				(0x1 << 16)
 
 #define VCLKCON0				0x0010
+#define VCLKCON0_ECLK_IDLE_GATE_EN		(1 << 12)
 #define VCLKCON0_CLKVALUP			(1 << 8)
 #define VCLKCON0_VLCKFREE			(1 << 0)
 

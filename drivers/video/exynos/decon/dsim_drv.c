@@ -1,15 +1,19 @@
-/* linux/drivers/video/exynos_decon/dsim_drv.c
+/*
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Samsung SoC MIPI-DSIM driver.
- *
- * Copyright (c) 2014 Samsung Electronics
- *
- * Jiun Yu <jiun.yu@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
+
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -47,6 +51,8 @@
 #include "dsim.h"
 #include "decon.h"
 
+#include "panels/dsim_panel.h"
+
 static DEFINE_MUTEX(dsim_rd_wr_mutex);
 static DECLARE_COMPLETION(dsim_ph_wr_comp);
 static DECLARE_COMPLETION(dsim_wr_comp);
@@ -54,9 +60,14 @@ static DECLARE_COMPLETION(dsim_rd_comp);
 
 static int dsim_runtime_suspend(struct device *dev);
 static int dsim_runtime_resume(struct device *dev);
+static int dsim_set_ulps_by_ddi(struct dsim_device *dsim, u32 en);
 
 #define MIPI_WR_TIMEOUT msecs_to_jiffies(50)
 #define MIPI_RD_TIMEOUT msecs_to_jiffies(50)
+
+#ifdef CONFIG_LCD_ALPM
+#define ALPM_TIMEOUT 3
+#endif
 
 #ifdef CONFIG_OF
 static const struct of_device_id exynos5_dsim[] = {
@@ -72,12 +83,19 @@ EXPORT_SYMBOL(dsim0_for_decon);
 struct dsim_device *dsim1_for_decon;
 EXPORT_SYMBOL(dsim1_for_decon);
 
-static void dsim_dump(struct dsim_device *dsim)
+static void dsim_dump(struct dsim_device *dsim, int dump_panel)
 {
 	dsim_info("=== DSIM SFR DUMP ===\n");
-
 	print_hex_dump(KERN_ERR, "", DUMP_PREFIX_ADDRESS, 32, 4,
 			dsim->reg_base, 0xBC, false);
+
+	if (dump_panel) {
+#ifdef CONFIG_DECON_MIPI_DSI_PKTGO
+		dsim_pkt_go_enable(dsim, false);
+#endif
+		dsim_info("=== Panel Status DUMP ===\n");
+		call_panel_ops(dsim, dump, dsim);
+	}
 }
 
 static void dsim_long_data_wr(struct dsim_device *dsim, unsigned long data0, unsigned int data1)
@@ -132,10 +150,16 @@ static void dsim_long_data_wr(struct dsim_device *dsim, unsigned long data0, uns
 
 static int dsim_wait_for_cmd_fifo_empty(struct dsim_device *dsim, int id)
 {
+	unsigned long wr_timeout = MIPI_WR_TIMEOUT;
+
+#ifdef CONFIG_LCD_ALPM
+	if(dsim->alpm)
+		wr_timeout *= ALPM_TIMEOUT;
+#endif
+
 	switch (id) {
 	case 0: /* SFR_PH_FIFO */
-		if (!wait_for_completion_interruptible_timeout(&dsim_ph_wr_comp,
-			MIPI_WR_TIMEOUT)) {
+		if (!wait_for_completion_timeout(&dsim_ph_wr_comp, wr_timeout)) {
 			if (dsim_read_mask(dsim->id, DSIM_INTSRC, DSIM_INTSRC_SFR_PH_FIFO_EMPTY)) {
 				INIT_COMPLETION(dsim_ph_wr_comp);
 				dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PH_FIFO_EMPTY);
@@ -145,8 +169,7 @@ static int dsim_wait_for_cmd_fifo_empty(struct dsim_device *dsim, int id)
 		}
 		break;
 	case 1: /* SFR_PL_FIFO */
-		if (!wait_for_completion_interruptible_timeout(&dsim_wr_comp,
-			MIPI_WR_TIMEOUT)) {
+		if (!wait_for_completion_timeout(&dsim_wr_comp, wr_timeout)) {
 			if (dsim_read_mask(dsim->id, DSIM_INTSRC, DSIM_INTSRC_SFR_PL_FIFO_EMPTY)) {
 				INIT_COMPLETION(dsim_wr_comp);
 				dsim_reg_clear_int(dsim->id, DSIM_INTSRC_SFR_PL_FIFO_EMPTY);
@@ -318,20 +341,76 @@ err_exit:
 }
 
 
+int dsim_write_hl_data(struct dsim_device *dsim, const u8 *cmd, u32 cmdSize)
+{
+	int ret;
+	int retry;
+	struct panel_private *panel = &dsim->priv;
+
+	if (panel->lcdConnected == PANEL_DISCONNEDTED)
+		return cmdSize;
+
+	//mutex_lock(&dsim->rdwr_lock);
+	retry = 5;
+
+try_write:
+	if (cmdSize == 1)
+		ret = dsim_write_data(dsim, MIPI_DSI_DCS_SHORT_WRITE, cmd[0], 0);
+	else if (cmdSize == 2)
+		ret = dsim_write_data(dsim, MIPI_DSI_DCS_SHORT_WRITE_PARAM, cmd[0], cmd[1]);
+	else
+		ret = dsim_write_data(dsim, MIPI_DSI_DCS_LONG_WRITE, (unsigned long)cmd, cmdSize);
+
+	if (ret != 0) {
+		if (--retry)
+			goto try_write;
+		else
+			dsim_err("dsim write failed,  cmd : %x\n", cmd[0]);
+	}
+	//mutex_unlock(&dsim->rdwr_lock);
+	return ret;
+}
+
+int dsim_read_hl_data(struct dsim_device *dsim, u8 addr, u32 size, u8 *buf)
+{
+	int ret;
+	int retry = 5;
+	struct panel_private *panel = &dsim->priv;
+
+	if (panel->lcdConnected == PANEL_DISCONNEDTED)
+		return size;
+
+try_read:
+	ret = dsim_read_data(dsim, MIPI_DSI_DCS_READ, (u32)addr, size, buf);
+	dsim_info("%s read ret : %d\n", __func__, ret);
+	if (ret != size) {
+		if (--retry)
+			goto try_read;
+		else
+			dsim_err("dsim read failed,  addr : %x\n", addr);
+	}
+
+	return ret;
+}
+
 #ifdef CONFIG_FB_WINDOW_UPDATE
 static int dsim_partial_area_command(struct dsim_device *dsim, void *arg)
 {
+	struct panel_private *panel = &dsim->priv;
 	struct decon_win_rect *win_rect = (struct decon_win_rect *)arg;
 	char data_2a[5];
 	char data_2b[5];
 	int retry;
 
+	if (panel->lcdConnected == PANEL_DISCONNEDTED)
+		return 0;
+
 	/* w is right & h is bottom */
 	data_2a[0] = MIPI_DCS_SET_COLUMN_ADDRESS;
-	data_2a[1] = (win_rect->x >> 8) & 0xff;
-	data_2a[2] = win_rect->x & 0xff;
-	data_2a[3] = (win_rect->w >> 8) & 0xff;
-	data_2a[4] = win_rect->w & 0xff;
+	data_2a[1] = ((win_rect->x +dsim->glide_display_size) >> 8) & 0xff;
+	data_2a[2] = (win_rect->x +dsim->glide_display_size) & 0xff;
+	data_2a[3] = ((win_rect->w +dsim->glide_display_size) >> 8) & 0xff;
+	data_2a[4] = (win_rect->w +dsim->glide_display_size) & 0xff;
 
 	data_2b[0] = MIPI_DCS_SET_PAGE_ADDRESS;
 	data_2b[1] = (win_rect->y >> 8) & 0xff;
@@ -421,6 +500,12 @@ int dsim_read_data(struct dsim_device *dsim, u32 data_id,
 {
 	u32 rx_fifo, rx_size = 0;
 	int i, j, ret = 0;
+	unsigned long rd_timeout = MIPI_RD_TIMEOUT;
+
+#ifdef CONFIG_LCD_ALPM
+	if(dsim->alpm)
+		rd_timeout *= ALPM_TIMEOUT;
+#endif
 
 	if (decon_int_drvdata) {
 		/* LPD related: Decon must be enabled for PACKET_GO mode */
@@ -442,8 +527,7 @@ int dsim_read_data(struct dsim_device *dsim, u32 data_id,
 
 	/* Read request */
 	dsim_write_data(dsim, data_id, addr, 0);
-	if (!wait_for_completion_interruptible_timeout(&dsim_rd_comp,
-		MIPI_RD_TIMEOUT)) {
+	if (!wait_for_completion_timeout(&dsim_rd_comp, rd_timeout)) {
 		dev_err(dsim->dev, "MIPI DSIM read Timeout!\n");
 		return -ETIMEDOUT;
 	}
@@ -466,8 +550,9 @@ int dsim_read_data(struct dsim_device *dsim, u32 data_id,
 	case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_1BYTE:
 	case MIPI_DSI_RX_GENERIC_SHORT_READ_RESPONSE_2BYTE:
 		dev_dbg(dsim->dev, "Short Packet was received from LCD module.\n");
-		for (i = 0; i <= count; i++)
+		for (i = 0; i < count; i++)
 			buf[i] = (rx_fifo >> (8 + i * 8)) & 0xff;
+		rx_size = count;
 		break;
 	case MIPI_DSI_RX_DCS_LONG_READ_RESPONSE:
 	case MIPI_DSI_RX_GENERIC_LONG_READ_RESPONSE:
@@ -784,10 +869,97 @@ static int dsim_get_gpios(struct dsim_device *dsim)
 	return 0;
 }
 
+
+static int dsim_get_regulator(struct dsim_device *dsim)
+{
+	int ret = 0;
+	char *str_reg_V30 = NULL;
+	char *str_reg_V18 = NULL;
+	char *str_reg_V16 = NULL;
+
+
+	struct device *dev = dsim->dev;
+	struct dsim_resources *res = &dsim->res;
+
+	dsim_info("%s +\n", __func__);
+
+	res->regulator_30V = NULL;
+	of_property_read_string(dev->of_node, "regulator_30V", (const char **)&str_reg_V30);
+	if (str_reg_V30) {
+		dsim_info("getting string : %s\n",str_reg_V30);
+		res->regulator_30V = regulator_get(NULL, str_reg_V30);
+		if (IS_ERR(res->regulator_30V)) {
+			dsim_err("%s : dsim regulator 3.0V get failed\n", __func__);
+			res->regulator_30V = NULL;
+		}
+	}
+
+	res->regulator_18V = NULL;
+	of_property_read_string(dev->of_node, "regulator_18V", (const char **)&str_reg_V18);
+	if (str_reg_V18) {
+		dsim_info("getting string : %s\n",str_reg_V18);
+		res->regulator_18V = regulator_get(NULL, str_reg_V18);
+		if (IS_ERR(res->regulator_18V)) {
+			dsim_err("%s : dsim regulator 1.8V get failed\n", __func__);
+			res->regulator_18V = NULL;
+		}
+	}
+
+	res->regulator_16V = NULL;
+	of_property_read_string(dev->of_node, "regulator_16V", (const char **)&str_reg_V16);
+	if (str_reg_V16) {
+		dsim_info("getting string : %s\n",str_reg_V16);
+		res->regulator_16V = regulator_get(NULL, str_reg_V16);
+		if (IS_ERR(res->regulator_16V)) {
+			dsim_err("%s : dsim regulator 1.6V get failed\n", __func__);
+			res->regulator_16V = NULL;
+		}
+	}
+
+	if (res->regulator_16V) {
+		ret = regulator_enable(res->regulator_16V);
+		if (ret) {
+			dsim_err("%s : dsim regulator 1.6V enable failed\n", __func__);
+		}
+	}
+
+	if (res->regulator_30V) {
+		ret = regulator_enable(res->regulator_30V);
+		if (ret) {
+			dsim_err("%s : dsim regulator 3.0V enable failed\n", __func__);
+		}
+	}
+
+	if (res->regulator_18V) {
+		ret = regulator_enable(res->regulator_18V);
+		if (ret) {
+			dsim_err("%s : dsim regulator 3.0V enable failed\n", __func__);
+		}
+	}
+
+	dsim_info("%s -\n", __func__);
+	return 0;
+}
+
 static int dsim_reset_panel(struct dsim_device *dsim)
 {
 	struct dsim_resources *res = &dsim->res;
 	int ret;
+
+#ifdef CONFIG_LCD_ALPM
+	if (dsim->alpm)
+		return 0;
+#endif
+
+#ifdef CONFIG_DSIM_ESD_RECOVERY_NOPOWER
+	if( decon_int_drvdata->esd.queuework_pending ) {
+		dsim_info( "%s : esd type is %d.\n", __func__, decon_int_drvdata->esd.irq_type );
+		if( decon_int_drvdata->esd.irq_type == irq_err_fg ) {
+			dsim_info( "%s : return by esd_recovery.\n", __func__ );
+			return 0;
+		}
+	}
+#endif
 
 	dsim_dbg("%s +\n", __func__);
 
@@ -813,9 +985,28 @@ static int dsim_reset_panel(struct dsim_device *dsim)
 static int dsim_set_panel_power(struct dsim_device *dsim, bool on)
 {
 	struct dsim_resources *res = &dsim->res;
+	struct panel_private *panel = &dsim->priv;
 	int ret;
 
 	dsim_dbg("%s(%d) +\n", __func__, on);
+
+#ifdef CONFIG_LCD_ALPM
+	if (dsim->alpm)
+		return 0;
+#endif
+
+	if (panel->lcdConnected == PANEL_DISCONNEDTED) {
+		dsim_err("%s: panel is not connected. panel power off.\n", __func__);
+		on = false;
+	}
+
+#ifdef CONFIG_DSIM_ESD_RECOVERY_NOPOWER
+	if( decon_int_drvdata->esd.queuework_pending
+		&& (decon_int_drvdata->esd.irq_type == irq_err_fg)) {
+		dsim_info( "%s : return by esd_recovery.\n", __func__ );
+		return 0;
+	}
+#endif
 
 	if (on) {
 		if (res->lcd_power[0] > 0) {
@@ -828,6 +1019,26 @@ static int dsim_set_panel_power(struct dsim_device *dsim, bool on)
 			usleep_range(10000, 11000);
 		}
 
+		if (res->regulator_18V) {
+			if (!regulator_is_enabled(res->regulator_18V)) {
+				ret = regulator_enable(res->regulator_18V);
+				if (ret) {
+					dsim_err("%s : dsim regulator 1.8V enable failed\n", __func__);
+					return -EINVAL;
+				}
+			}
+			usleep_range(10000, 11000);
+		}
+			if (res->regulator_16V) {
+			if (!regulator_is_enabled(res->regulator_16V)) {
+				ret = regulator_enable(res->regulator_16V);
+				if (ret) {
+					dsim_err("%s : dsim regulator 1.6V enable failed\n", __func__);
+					return -EINVAL;
+				}
+			}
+			usleep_range(10000, 11000);
+		}
 		if (res->lcd_power[1] > 0) {
 			ret = gpio_request_one(res->lcd_power[1], GPIOF_OUT_INIT_HIGH, "lcd_power1");
 			if (ret < 0) {
@@ -838,13 +1049,27 @@ static int dsim_set_panel_power(struct dsim_device *dsim, bool on)
 			usleep_range(10000, 11000);
 		}
 
-		/* TODO: only in case of command mode */
-		ret = pinctrl_select_state(dsim->pinctrl, dsim->turnon_tes);
-		if (ret) {
-			dsim_err("failed to turn on TE\n");
-			return -EINVAL;
+		if (res->regulator_30V) {
+			if (!regulator_is_enabled(res->regulator_30V)) {
+				ret = regulator_enable(res->regulator_30V);
+				if (ret) {
+					dsim_err("%s : dsim regulator 3.0V enable failed\n", __func__);
+					return -EINVAL;
+				}
+			}
+			usleep_range(10000, 11000);
+		}
+
+		if (dsim->lcd_info.mode != DECON_VIDEO_MODE) {
+			/* TODO: only in case of command mode */
+			ret = pinctrl_select_state(dsim->pinctrl, dsim->turnon_tes);
+			if (ret) {
+				dsim_err("failed to turn on TE\n");
+				return -EINVAL;
+			}
 		}
 	} else {
+
 		ret = gpio_request_one(res->lcd_reset, GPIOF_OUT_INIT_LOW, "lcd_reset");
 		if (ret < 0) {
 			dsim_err("failed LCD reset off\n");
@@ -862,6 +1087,26 @@ static int dsim_set_panel_power(struct dsim_device *dsim, bool on)
 			usleep_range(5000, 6000);
 		}
 
+		if (res->regulator_30V) {
+			if (regulator_is_enabled(res->regulator_30V)) {
+				ret = regulator_disable(res->regulator_30V);
+				if (ret) {
+					dsim_err("%s : dsim regulator 3.0V disable failed\n", __func__);
+					return -EINVAL;
+				}
+			}
+			usleep_range(5000, 6000);
+		}
+		if (res->regulator_16V) {
+			if (regulator_is_enabled(res->regulator_16V)) {
+				ret = regulator_disable(res->regulator_16V);
+				if (ret) {
+					dsim_err("%s : dsim regulator 1.6V disable failed\n", __func__);
+					return -EINVAL;
+				}
+			}
+			usleep_range(5000, 6000);
+		}
 		if (res->lcd_power[1] > 0) {
 			ret = gpio_request_one(res->lcd_power[1], GPIOF_OUT_INIT_LOW, "lcd_power1");
 			if (ret < 0) {
@@ -872,11 +1117,24 @@ static int dsim_set_panel_power(struct dsim_device *dsim, bool on)
 			usleep_range(5000, 6000);
 		}
 
-		/* TODO: only in case of command mode */
-		ret = pinctrl_select_state(dsim->pinctrl, dsim->turnoff_tes);
-		if (ret) {
-			dsim_err("failed to turn off TE\n");
-			return -EINVAL;
+		if (res->regulator_18V) {
+			if (regulator_is_enabled(res->regulator_18V)) {
+				ret = regulator_disable(res->regulator_18V);
+				if (ret) {
+					dsim_err("%s : dsim regulator 1.8V disable failed\n", __func__);
+					return -EINVAL;
+				}
+			}
+			usleep_range(5000, 6000);
+		}
+
+		if (dsim->lcd_info.mode != DECON_VIDEO_MODE) {
+			/* TODO: only in case of command mode */
+			ret = pinctrl_select_state(dsim->pinctrl, dsim->turnoff_tes);
+			if (ret) {
+				dsim_err("failed to turn off TE\n");
+				return -EINVAL;
+			}
 		}
 	}
 
@@ -887,8 +1145,17 @@ static int dsim_set_panel_power(struct dsim_device *dsim, bool on)
 
 static int dsim_enable(struct dsim_device *dsim)
 {
-	if (dsim->state == DSIM_STATE_HSCLKEN)
-		return 0;
+	pr_info("%s ++\n", __func__);
+
+	if (dsim->state == DSIM_STATE_HSCLKEN) {
+#ifdef CONFIG_LCD_DOZE_MODE
+		if ((dsim->dsim_doze == DSIM_DOZE_STATE_DOZE) ||
+			(dsim->dsim_doze == DSIM_DOZE_STATE_DOZE_SUSPEND)) {
+			call_panel_ops(dsim, exitalpm, dsim);
+		}
+#endif
+		goto exit_dsim_enable;
+	}
 
 #if defined(CONFIG_PM_RUNTIME)
 	pm_runtime_get_sync(dsim->dev);
@@ -913,8 +1180,21 @@ static int dsim_enable(struct dsim_device *dsim)
 
 	dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 1);
 
-	dsim_reset_panel(dsim);
+#ifdef CONFIG_LCD_ALPM
+	if(dsim->alpm)
+		dsim_set_ulps_by_ddi(dsim, 0);
+#endif
 
+#ifdef CONFIG_LCD_DOZE_MODE
+	if ((dsim->dsim_doze == DSIM_DOZE_STATE_DOZE) ||
+		(dsim->dsim_doze == DSIM_DOZE_STATE_DOZE_SUSPEND)) {
+		dsim_info("%s : exit doze\n", __func__);
+	} else {
+		dsim_reset_panel(dsim);
+	}
+#else
+	dsim_reset_panel(dsim);
+#endif
 	dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 1);
 
 	/* enable interrupts */
@@ -922,17 +1202,36 @@ static int dsim_enable(struct dsim_device *dsim)
 
 	dsim->state = DSIM_STATE_HSCLKEN;
 
+#ifdef CONFIG_LCD_DOZE_MODE
+	if ((dsim->dsim_doze == DSIM_DOZE_STATE_DOZE) ||
+		(dsim->dsim_doze == DSIM_DOZE_STATE_DOZE_SUSPEND)) {
+		call_panel_ops(dsim, exitalpm, dsim);
+	} else {
+		call_panel_ops(dsim, displayon, dsim);
+	}
+#else
 	call_panel_ops(dsim, displayon, dsim);
+#endif
 
 	dsim_clocks_info(dsim);
+exit_dsim_enable:
+#ifdef CONFIG_LCD_DOZE_MODE
+	dsim->dsim_doze = DSIM_DOZE_STATE_NORMAL;
+	dsim->priv.curr_alpm_mode = 0;
+#endif
+
+	pr_info("%s --\n", __func__);
 
 	return 0;
 }
 
 static int dsim_disable(struct dsim_device *dsim)
 {
-	if (dsim->state == DSIM_STATE_SUSPEND)
-		return 0;
+	pr_info("%s ++\n", __func__);
+
+	if (dsim->state == DSIM_STATE_SUSPEND) {
+		goto exit_dsim_disable;
+	}
 
 #ifdef CONFIG_DECON_MIPI_DSI_PKTGO
 	dsim_pkt_go_enable(dsim, false);
@@ -940,6 +1239,11 @@ static int dsim_disable(struct dsim_device *dsim)
 	dsim_set_lcd_full_screen(dsim);
 	call_panel_ops(dsim, suspend, dsim);
 
+#ifdef CONFIG_LCD_DOZE_MODE
+	dsim->dsim_doze = DSIM_DOZE_STATE_SUSPEND;
+#endif
+//fixme ignore mutex?
+	dsim->state = DSIM_STATE_SUSPEND;
 	/* Wait for current read & write CMDs. */
 	mutex_lock(&dsim_rd_wr_mutex);
 	dsim->state = DSIM_STATE_SUSPEND;
@@ -950,6 +1254,11 @@ static int dsim_disable(struct dsim_device *dsim)
 
 	/* disable HS clock */
 	dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 0);
+
+#ifdef CONFIG_LCD_ALPM
+	if(dsim->alpm)
+		dsim_set_ulps_by_ddi(dsim, 1);
+#endif
 
 	/* make CLK/DATA Lane as LP00 */
 	dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 0);
@@ -965,14 +1274,158 @@ static int dsim_disable(struct dsim_device *dsim)
 
 	dsim_set_panel_power(dsim, 0);
 
+
 #if defined(CONFIG_PM_RUNTIME)
 	pm_runtime_put_sync(dsim->dev);
 #else
 	dsim_runtime_suspend(dsim->dev);
 #endif
 
+exit_dsim_disable:
+	pr_info("%s --\n", __func__);
+
 	return 0;
 }
+
+#ifdef CONFIG_LCD_DOZE_MODE
+static int dsim_doze_enable(struct dsim_device *dsim)
+{
+	struct panel_private *panel = &dsim->priv;
+
+	dsim_info("++ %s\n", __func__);
+
+	if (panel->alpm_support == 0) {
+		dsim_info("%s:this panel does not support alpm mode\n", __func__);
+		return -ENODEV;
+	}
+
+	if (dsim->state == DSIM_STATE_HSCLKEN) {
+		if (dsim->dsim_doze != DSIM_DOZE_STATE_DOZE) {
+			call_panel_ops(dsim, enteralpm, dsim);
+			dsim->dsim_doze = DSIM_DOZE_STATE_DOZE;
+		}
+		goto set_state_doze;
+	}
+#if defined(CONFIG_PM_RUNTIME)
+	pm_runtime_get_sync(dsim->dev);
+#else
+	dsim_runtime_resume(dsim->dev);
+#endif
+
+	if (dsim->dsim_doze == DSIM_DOZE_STATE_SUSPEND) {
+		dsim_set_panel_power(dsim, 1);
+	}
+
+	/* DPHY power on */
+	dsim_d_phy_onoff(dsim, 1);
+
+	dsim_reg_init(dsim->id, &dsim->lcd_info, dsim->data_lane_cnt);
+
+	clk_prepare_enable(dsim->res.dphy_esc);
+	clk_prepare_enable(dsim->res.dphy_byte);
+
+	dsim_reg_enable_clocks(dsim->id, &dsim->clks_param,
+			DSIM_LANE_CLOCK | dsim->data_lane);
+
+	dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 1);
+
+#ifdef CONFIG_LCD_ALPM
+	if(dsim->alpm)
+		dsim_set_ulps_by_ddi(dsim, 0);
+#endif
+
+
+	if (dsim->dsim_doze == DSIM_DOZE_STATE_SUSPEND) {
+		dsim_reset_panel(dsim);
+	}
+
+	dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 1);
+
+	/* enable interrupts */
+	dsim_reg_set_int(dsim->id, 1);
+
+
+	dsim->state = DSIM_STATE_HSCLKEN;
+
+	if (dsim->dsim_doze == DSIM_DOZE_STATE_SUSPEND) {
+		call_panel_ops(dsim, enteralpm, dsim);
+	}
+
+	if (dsim->dsim_doze == DSIM_DOZE_STATE_DOZE_SUSPEND) {
+		if (panel->curr_alpm_mode != panel->alpm_mode) {
+			call_panel_ops(dsim, enteralpm, dsim);
+		}
+	}
+set_state_doze:
+	dsim->dsim_doze = DSIM_DOZE_STATE_DOZE;
+
+
+	dsim_info("-- %s\n", __func__);
+
+	return 0;
+}
+
+static int dsim_doze_suspend(struct dsim_device *dsim)
+{
+
+	struct panel_private *panel = &dsim->priv;
+
+	dsim_info("++ %s\n", __func__);
+
+	if (panel->alpm_support == 0) {
+		dsim_info("%s:this panel does not support alpm mode\n", __func__);
+		return -ENODEV;
+	}
+
+	if (dsim->state == DSIM_STATE_SUSPEND) {
+		goto exit_doze_disable;
+	}
+
+#ifdef CONFIG_DECON_MIPI_DSI_PKTGO
+	dsim_pkt_go_enable(dsim, false);
+#endif
+	dsim_set_lcd_full_screen(dsim);
+#if 0
+	if (dsim->dsim_doze != DSIM_DOZE_STATE_DOZE)
+		call_panel_ops(dsim, suspend, dsim);
+#endif
+	if (dsim->dsim_doze == DSIM_DOZE_STATE_NORMAL)
+		call_panel_ops(dsim, enteralpm, dsim);
+
+	dsim->dsim_doze = DSIM_DOZE_STATE_DOZE_SUSPEND;
+
+	/* Wait for current read & write CMDs. */
+	mutex_lock(&dsim_rd_wr_mutex);
+	dsim->state = DSIM_STATE_SUSPEND;
+	mutex_unlock(&dsim_rd_wr_mutex);
+
+	dsim_reg_set_int(dsim->id, 0);
+	dsim_reg_set_standby(dsim->id, &dsim->lcd_info, 0);
+	dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 0);
+	dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 0);
+	dsim_reg_set_esc_clk_on_lane(dsim->id, 0, dsim->data_lane);
+	dsim_reg_enable_byte_clock(dsim->id, 0);
+	dsim_reg_set_clocks(dsim->id, NULL, dsim->data_lane, 0);
+	dsim_reg_sw_reset(dsim->id);
+
+	dsim_d_phy_onoff(dsim, 0);
+
+#if 0
+	if (dsim->dsim_doze != DSIM_DOZE_STATE_DOZE)
+		dsim_set_panel_power(dsim, 0);
+#endif
+
+#if defined(CONFIG_PM_RUNTIME)
+	pm_runtime_put_sync(dsim->dev);
+#else
+	dsim_runtime_suspend(dsim->dev);
+#endif
+
+exit_doze_disable:
+	dsim_info("-- %s\n", __func__);
+	return 0;
+}
+#endif
 
 static int dsim_set_ulps_by_ddi(struct dsim_device *dsim, u32 en)
 {
@@ -1029,7 +1482,7 @@ static int dsim_enter_ulps(struct dsim_device *dsim)
 	ret = dsim_set_ulps_by_ddi(dsim, 1);
 	if (ret < 0) {
 		dsim_info("%s: failed to enter ULPS: %d", __func__, ret);
-		dsim_dump(dsim);
+		dsim_dump(dsim, 0);
 		ret = 0;
 	}
 
@@ -1097,7 +1550,7 @@ static int dsim_exit_ulps(struct dsim_device *dsim)
 	ret = dsim_set_ulps_by_ddi(dsim, 0);
 	if (ret < 0) {
 		dsim_info("%s: failed to exit ULPS: %d", __func__, ret);
-		dsim_dump(dsim);
+		dsim_dump(dsim, 0);
 	}
 
 	dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 1);
@@ -1125,12 +1578,28 @@ static struct dsim_device *sd_to_dsim(struct v4l2_subdev *sd)
 
 static int dsim_s_stream(struct v4l2_subdev *sd, int enable)
 {
+	int ret = 0;
 	struct dsim_device *dsim = sd_to_dsim(sd);
 
-	if (enable)
-		return dsim_enable(dsim);
-	else
-		return dsim_disable(dsim);
+	switch (enable) {
+		case DSIM_REQ_POWER_OFF:
+			ret = dsim_disable(dsim);
+			break;
+		case DSIM_REQ_POWER_ON:
+			ret = dsim_enable(dsim);
+			break;
+#ifdef CONFIG_LCD_DOZE_MODE
+		case DSIM_REQ_DOZE_MODE:
+			dsim_info("decon : dsim doze mode\n");
+			ret = dsim_doze_enable(dsim);
+			break;
+		case DSIM_REQ_DOZE_SUSPEND:
+			dsim_info("decon : dsim doze suspend\n");
+			ret = dsim_doze_suspend(dsim);
+			break;
+#endif
+	}
+	return ret;
 }
 
 static long dsim_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
@@ -1174,7 +1643,7 @@ static long dsim_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 		break;
 #endif
 	case DSIM_IOC_DUMP:
-		dsim_dump(dsim);
+		dsim_dump(dsim, 1);
 		break;
 	default:
 		dev_err(dsim->dev, "unsupported ioctl");
@@ -1302,41 +1771,46 @@ int dsim_create_rw_test_sysfs(struct dsim_device *dsim)
 	return ret;
 }
 
+
 static int dsim_parse_lcd_info(struct dsim_device *dsim)
 {
 	u32 res[3];
 	struct device_node *node;
 
 	node = of_parse_phandle(dsim->dev->of_node, "lcd_info", 0);
+
 	dsim_info("%s is founded\n", of_node_full_name(node));
 
 	of_property_read_u32(node, "mode", &dsim->lcd_info.mode);
 	dsim_dbg("%s mode\n", dsim->lcd_info.mode ? "command" : "video");
 
 	of_property_read_u32_array(node, "resolution", res, 2);
+
 	dsim->lcd_info.xres = res[0];
 	dsim->lcd_info.yres = res[1];
 	dsim_info("LCD resolution: xres(%d), yres(%d)\n", res[0], res[1]);
 
 	of_property_read_u32_array(node, "size", res, 2);
+
 	dsim->lcd_info.width = res[0];
 	dsim->lcd_info.height = res[1];
-	dsim_dbg("LCD size: width(%d), height(%d)\n", res[0], res[1]);
+
+	dsim_info("LCD size: width(%d), height(%d)\n", dsim->lcd_info.width, dsim->lcd_info.height);
 
 	of_property_read_u32(node, "timing,refresh", &dsim->lcd_info.fps);
-	dsim_dbg("LCD refresh rate(%d)\n", dsim->lcd_info.fps);
+	dsim_info("LCD refresh rate(%d)\n", dsim->lcd_info.fps);
 
 	of_property_read_u32_array(node, "timing,h-porch", res, 3);
 	dsim->lcd_info.hbp = res[0];
 	dsim->lcd_info.hfp = res[1];
-	dsim->lcd_info.hsa = res[1];
-	dsim_dbg("hbp(%d), hfp(%d), hsa(%d)\n", res[0], res[1], res[2]);
+	dsim->lcd_info.hsa = res[2];
+	dsim_info("hbp(%d), hfp(%d), hsa(%d)\n", res[0], res[1], res[2]);
 
 	of_property_read_u32_array(node, "timing,v-porch", res, 3);
 	dsim->lcd_info.vbp = res[0];
 	dsim->lcd_info.vfp = res[1];
-	dsim->lcd_info.vsa = res[1];
-	dsim_dbg("vbp(%d), vfp(%d), vsa(%d)\n", res[0], res[1], res[2]);
+	dsim->lcd_info.vsa = res[2];
+	dsim_info("vbp(%d), vfp(%d), vsa(%d)\n", res[0], res[1], res[2]);
 
 	of_property_read_u32(node, "timing,dsi-hs-clk", &dsim->lcd_info.hs_clk);
 	dsim->clks_param.clks.hs_clk = dsim->lcd_info.hs_clk;
@@ -1368,8 +1842,7 @@ static int dsim_probe(struct platform_device *pdev)
 	dsim = devm_kzalloc(dev, sizeof(struct dsim_device), GFP_KERNEL);
 	if (!dsim) {
 		dev_err(dev, "failed to allocate dsim device.\n");
-		ret = -ENOMEM;
-		goto err;
+		return -ENOMEM;
 	}
 
 	dsim->id = of_alias_get_id(dev->of_node, "dsim");
@@ -1382,7 +1855,16 @@ static int dsim_probe(struct platform_device *pdev)
 
 	dsim->dev = &pdev->dev;
 
+	ret = dsim_panel_ops_init(dsim);
+	if (ret) {
+		dsim_err("%s : failed to set panel ops\n", __func__);
+		goto fail_free;
+	}
+
+	call_panel_ops(dsim, early_probe, dsim);
+
 	dsim_get_gpios(dsim);
+	dsim_get_regulator(dsim);
 
 	dsim_get_clocks(dsim);
 	spin_lock_init(&dsim->slock);
@@ -1396,7 +1878,7 @@ static int dsim_probe(struct platform_device *pdev)
 	if (!res) {
 		dev_err(dev, "failed to get resource");
 		ret = -ENOENT;
-		goto err_mem_region;
+		goto fail_clock;
 	}
 
 	dsim_info("res: start(0x%x), end(0x%x)\n", (u32)res->start, (u32)res->end);
@@ -1404,14 +1886,14 @@ static int dsim_probe(struct platform_device *pdev)
 	if (!dsim->reg_base) {
 		dev_err(&pdev->dev, "mipi-dsi: failed to remap io region\n");
 		ret = -EINVAL;
-		goto err_mem_region;
+		goto fail_clock;
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
 	if (!res) {
 		dev_err(dev, "failed to get resource");
 		ret = -EINVAL;
-		goto err_mem_region;
+		goto fail_clock;
 	}
 
 	dsim->irq = res->start;
@@ -1419,41 +1901,29 @@ static int dsim_probe(struct platform_device *pdev)
 			dsim_interrupt_handler, 0, pdev->name, dsim);
 	if (ret) {
 		dev_err(dev, "failed to install irq\n");
-		goto err_irq;
+		goto fail_clock;
 	}
 
 	dsim->pinctrl = devm_pinctrl_get(dev);
 	if (IS_ERR(dsim->pinctrl)) {
 		dev_err(dev, "failed to get lcd pinctrl\n");
-		goto err_irq;
+		goto fail_irq;
 	} else {
 		dsim->turnon_tes = pinctrl_lookup_state(dsim->pinctrl, "turnon_tes");
 		if (IS_ERR(dsim->turnon_tes)) {
 			dev_err(dev, "failed to get turnon_test pin state\n");
-			goto err_irq;
+			goto fail_irq;
 		}
 		dsim->turnoff_tes = pinctrl_lookup_state(dsim->pinctrl, "turnoff_tes");
 		if (IS_ERR(dsim->turnoff_tes)) {
 			dev_err(dev, "failed to get turnoff_test pin state\n");
-			goto err_irq;
+			goto fail_irq;
 		}
 	}
 
 	ret = dsim_register_entity(dsim);
 	if (ret)
-		goto err_irq;
-
-#if IS_ENABLED(CONFIG_EXYNOS_DECON_LCD_S6E3HA2K)
-	dsim->panel_ops = &s6e3ha2k_mipi_lcd_driver;
-#elif IS_ENABLED(CONFIG_EXYNOS_DECON_LCD_S6E3HF2)
-	dsim->panel_ops = &s6e3hf2_mipi_lcd_driver;
-#elif IS_ENABLED(CONFIG_EXYNOS_DECON_LCD_S6E3HF2_WQHD)
-	dsim->panel_ops = &s6e3hf2_wqhd_mipi_lcd_driver;
-#elif IS_ENABLED(CONFIG_EXYNOS_DECON_LCD_S6E3FA0)
-	dsim->panel_ops = &s6e3fa0_mipi_lcd_driver;
-#else
-	dsim->panel_ops = &s6e3ha0_mipi_lcd_driver;
-#endif
+		goto fail_irq;
 
 	dsim->timing.bps = 0;
 
@@ -1479,7 +1949,8 @@ static int dsim_probe(struct platform_device *pdev)
 		break;
 	default:
 		dev_info(dsim->dev, "data lane is invalid.\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto fail_mutex;
 	};
 
 	dsim->state = DSIM_STATE_SUSPEND;
@@ -1489,7 +1960,6 @@ static int dsim_probe(struct platform_device *pdev)
 #else
 	dsim_runtime_resume(dsim->dev);
 #endif
-
 	dsim_reg_prepare_clocks(&dsim->clks_param);
 
 	/* DSIM does not need to start, if DSIM is already
@@ -1503,16 +1973,27 @@ static int dsim_probe(struct platform_device *pdev)
 		clk_prepare_enable(dsim->res.dphy_esc);
 		clk_prepare_enable(dsim->res.dphy_byte);
 
-		dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 1);
+		ret = dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 1);
+		if (ret) {
+			dsim_err("%s : failed to set lanes\n" , __func__);
+			goto fail_mutex;
+		}
 
-		dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 1);
+		ret = dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 1);
+		if (ret) {
+			dsim_err("%s : failed to set hs clock\n", __func__);
+			goto fail_mutex;
+		}
 		dsim_reg_set_int(dsim->id, 1);
 
 		goto dsim_init_done;
 	}
 
-	dsim_set_panel_power(dsim, 1);
-
+	ret = dsim_set_panel_power(dsim, 1);
+	if (ret) {
+		dsim_err("%s : failed to panel power\n", __func__);
+		goto fail_mutex;
+	}
 	/* DPHY power on */
 	dsim_d_phy_onoff(dsim, 1);
 
@@ -1524,18 +2005,31 @@ static int dsim_probe(struct platform_device *pdev)
 	clk_prepare_enable(dsim->res.dphy_esc);
 	clk_prepare_enable(dsim->res.dphy_byte);
 
-	dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 1);
-
-	dsim_reset_panel(dsim);
-
-	dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 1);
-
+	ret = dsim_reg_set_lanes(dsim->id, DSIM_LANE_CLOCK | dsim->data_lane, 1);
+	if (ret) {
+		dsim_err("%s : failed dsim set lane\n", __func__);
+		goto fail_mutex;
+	}
+	ret = dsim_reset_panel(dsim);
+	if (ret) {
+		dsim_err("%s : failed dsim reset panel\n", __func__);
+		goto fail_mutex;
+	}
+	ret = dsim_reg_set_hs_clock(dsim->id, &dsim->lcd_info, 1);
+	if (ret) {
+		dsim_err("%s : failed dsim hs clock\n", __func__);
+		goto fail_mutex;
+	}
 	/* enable interrupts */
 	dsim_reg_set_int(dsim->id, 1);
 
 dsim_init_done:
 
 	dsim->state = DSIM_STATE_HSCLKEN;
+
+#ifdef CONFIG_LCD_DOZE_MODE
+	dsim->dsim_doze = DSIM_DOZE_STATE_NORMAL;
+#endif
 
 	call_panel_ops(dsim, probe, dsim);
 	/* TODO: displayon is moved to decon probe only in case of lcd on probe */
@@ -1548,17 +2042,27 @@ dsim_init_done:
 	dev_info(dev, "mipi-dsi driver(%s mode) has been probed.\n",
 		dsim->lcd_info.mode == DECON_MIPI_COMMAND_MODE ? "CMD" : "VIDEO");
 
+#ifdef CONFIG_LCD_ALPM
+	dsim->alpm = 0;
+#endif
+
 	return 0;
 
-err_irq:
+fail_mutex:
+	mutex_destroy(&dsim_rd_wr_mutex);
+
+fail_irq:
 	release_resource(res);
 
-err_mem_region:
+fail_clock:
 	dsim_put_clocks(dsim);
+
+fail_free:
 	kfree(dsim);
 
-err:
+	dsim_err("%s : dsim prove failed\n", __func__);
 	return ret;
+
 }
 
 static int dsim_remove(struct platform_device *pdev)
@@ -1578,15 +2082,27 @@ static int dsim_remove(struct platform_device *pdev)
 
 static void dsim_shutdown(struct platform_device *pdev)
 {
+	int ret;
 	struct device *dev = &pdev->dev;
 	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct dsim_device *dsim = sd_to_dsim(sd);
 
 	dev_info(dev, "%s +\n", __func__);
-	dsim_set_panel_power(dsim, 0);
 
+	dsim_info("dsim->state : %d\n", dsim->state);
+
+	if (dsim->state != DSIM_STATE_SUSPEND) {
+		ret = dsim_disable(dsim);
+		if (ret) {
+			dsim_info("%s : failed to disable\n", __func__);
+			goto shutdown_exit;
+		}
+	}
 	dev_info(dev, "mipi-dsi driver shutdown\n");
+
+shutdown_exit:
 	dev_info(dev, "%s -\n", __func__);
+	return;
 }
 
 static const struct of_device_id dsim_match[] = {

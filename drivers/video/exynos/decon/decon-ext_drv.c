@@ -1,13 +1,19 @@
 /*
- * Copyright (c) 2014 Samsung Electronics Co., Ltd.
- *		http://www.samsung.com
+ * Copyright@ Samsung Electronics Co. LTD
  *
- * Core file for Samsung EXYNOS DECON driver
- *
- * This program is free software; you can redistribute it and/or modify
+ * This software is proprietary of Samsung Electronics.
+ * No part of this software, either material or conceptual may be copied or distributed, transmitted,
+ * transcribed, stored in a retrieval system or translated into any human or computer language in any form by any means,
+ * electronic, mechanical, manual or otherwise, or disclosed
+ * to third parties without the express written permission of Samsung Electronics.
+
+ * Alternatively, this program is free software in case of open source projec;
+ * you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
-*/
+
+ */
+
 
 #include <linux/of_gpio.h>
 #include <linux/clk-provider.h>
@@ -192,7 +198,7 @@ struct decon_lcd *find_porch(struct v4l2_mbus_framefmt mbus_fmt)
 	struct decon_lcd *porch;
 	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(decon_int_porchs); ++i) {
+	for (i = 0; i < (u32) ARRAY_SIZE(decon_int_porchs); ++i) {
 		porch = &decon_int_porchs[i];
 		if ((mbus_fmt.field == V4L2_FIELD_INTERLACED)
 			&& (mbus_fmt.field == porch->mode))

@@ -88,8 +88,10 @@ static struct edid_preset {
 	{ V4L2_DV_BT_CEA_3840X2160P25,	3840, 2160, 25, FB_VMODE_NONINTERLACED, "2160p@25" },
 	{ V4L2_DV_BT_CEA_3840X2160P30,	3840, 2160, 30, FB_VMODE_NONINTERLACED, "2160p@30" },
 	{ V4L2_DV_BT_CEA_4096X2160P24,	4096, 2160, 24, FB_VMODE_NONINTERLACED, "(4096x)2160p@24" },
+#ifndef CONFIG_SEC_MHL_SUPPORT
 	{ V4L2_DV_BT_CEA_1920X1080I50,	1920, 1080, 50, FB_VMODE_INTERLACED, "1080i@50" },
 	{ V4L2_DV_BT_CEA_1920X1080I60,	1920, 1080, 60, FB_VMODE_INTERLACED, "1080i@60" },
+#endif
 };
 
 static struct edid_3d_preset {
@@ -137,6 +139,157 @@ static int audio_bit_rates;
 static int audio_sample_rates;
 static u32 source_phy_addr;
 
+#ifdef CONFIG_SEC_MHL_EDID
+static u8 exynos_hdmi_edid[EDID_MAX_LENGTH];
+static enum MHL_MAX_RESOLUTION mhl_max_res = MHL_1080P_30;
+
+int hdmi_forced_resolution = -1;
+
+int hdmi_get_datablock_offset(u8 *edid, enum extension_edid_db datablock,
+							int *offset)
+{
+	int i = 0, length = 0;
+	u8 current_byte, disp;
+
+	if (edid[0x7e] == 0x00)
+		return 1;
+
+	disp = edid[(0x80) + 2];
+	pr_info("HDMI: Extension block present db %d %x\n", datablock, disp);
+	if (disp == 0x4)
+		return 1;
+
+	i = 0x80 + 0x4;
+	while (i < (0x80 + disp)) {
+		current_byte = edid[i];
+		if ((current_byte >> 5) == datablock) {
+			*offset = i;
+			pr_info("HDMI: datablock %d %d\n", datablock, *offset);
+			return 0;
+		} else {
+			length = (current_byte &
+				HDMI_EDID_EX_DATABLOCK_LEN_MASK) + 1;
+			i += length;
+		}
+	}
+	return 1;
+}
+
+int hdmi_send_audio_info(int onoff, struct hdmi_device *hdev)
+{
+	int offset, j = 0, length = 0;
+	enum extension_edid_db vsdb;
+	u16 audio_info = 0, data_byte = 0;
+	char *edid = (char *) exynos_hdmi_edid;
+
+	if (onoff) {
+		/* get audio channel info */
+		vsdb = DATABLOCK_AUDIO;
+		if (!hdmi_get_datablock_offset(edid, vsdb, &offset)) {
+			data_byte = edid[offset];
+			length = data_byte & HDMI_EDID_EX_DATABLOCK_LEN_MASK;
+
+			if (length >= HDMI_AUDIO_FORMAT_MAX_LENGTH)
+				length = HDMI_AUDIO_FORMAT_MAX_LENGTH;
+
+			for (j = 1 ; j < length ; j++) {
+				if (j%3 == 1) {
+					data_byte = edid[offset + j];
+					audio_info |= 1 << (data_byte & 0x07);
+				}
+			}
+			pr_info("HDMI: Audio supported ch = %d\n", audio_info);
+		}
+
+		/* get speaker info */
+		vsdb = DATABLOCK_SPEAKERS;
+		if (!hdmi_get_datablock_offset(edid, vsdb, &offset)) {
+			data_byte = edid[offset + 1];
+			pr_info("HDMI: speaker alloc = %d\n",
+						(data_byte & 0x7F));
+			audio_info |= (data_byte & 0x7F) << 8;
+		}
+
+		pr_info("HDMI: Audio info = %d\n", audio_info);
+	}
+
+	return audio_info;
+}
+
+#ifdef CONFIG_SAMSUNG_MHL_8240
+int exynos_get_edid(u8 *edid, int size, u8 link_mode)
+{
+	mhl_max_res = MHL_1080P_30;
+
+	pr_info("%s: size=%d\n", __func__, size);
+
+	if (size > EDID_MAX_LENGTH) {
+		pr_err("%s: size is over %d\n", __func__, size);
+		return -1;
+	}
+	memcpy(exynos_hdmi_edid, edid, size);
+
+	if (!(link_mode & (0x1 << 3)))
+		mhl_max_res = MHL_1080P_30;
+	else
+		mhl_max_res = MHL_1080P_60;
+
+	pr_info("%s, link_mode= %d max_resolution %d\n", __func__, link_mode, mhl_max_res);
+
+	return 0;
+}
+EXPORT_SYMBOL(exynos_get_edid);
+
+#else /* CONFIG_SAMSUNG_MHL_8240 */
+enum MHL_MAX_RESOLUTION check_mhl_max_resolution(u8 mhl_ver, int
+		mhl_link_mode, int tmds_speed)
+{
+	bool support_ppixel_mode =
+		mhl_link_mode &  MHL_DEV_VID_LINK_SUPP_PPIXEL ? true : false;
+	bool support_16ppixel_mode =
+		mhl_link_mode &  MHL_DEV_VID_LINK_SUPP_16BPP ? true : false;
+
+	if (mhl_ver < 0x20 && !support_ppixel_mode)
+		return MHL_1080P_30;
+
+	else if (mhl_ver < 0x30 && support_ppixel_mode)
+		return MHL_1080P_60;
+
+	else if (mhl_ver >= 0x30) {
+		if (tmds_speed == MHL_XDC_TMDS_150)
+			return MHL_576P_50;
+		else if (tmds_speed == MHL_XDC_TMDS_300)
+			return MHL_1080P_30;
+		else if (!support_16ppixel_mode)
+			return MHL_1080P_60;
+		else
+			return MHL_UHD;
+	}
+
+	return MHL_1080P_60;
+}
+
+int exynos_get_edid(u8 *edid, int size, u8 mhl_ver, int mhl_link_mode,
+		int tmds_speed)
+{
+	mhl_max_res = MHL_1080P_30;
+
+	if (size > EDID_MAX_LENGTH) {
+		pr_err("%s: size is over %d\n", __func__, size);
+		return -1;
+	}
+	memcpy(exynos_hdmi_edid, edid, size);
+
+	mhl_max_res = check_mhl_max_resolution(mhl_ver, mhl_link_mode, tmds_speed);
+
+	pr_info("%s, mhl_ver 0x%02x link_mode= %d tmds_speed= %d max_resolution	%d\n",
+			__func__,	mhl_ver, mhl_link_mode,	tmds_speed, mhl_max_res);
+	return 0;
+}
+EXPORT_SYMBOL(exynos_get_edid);
+#endif /* CONFIG_SAMSUNG_MHL_8240 */
+
+#else /* CONFIG_SEC_MHL_EDID */
 static int edid_i2c_read(struct hdmi_device *hdev, u8 segment, u8 offset,
 						   u8 *buf, size_t len)
 {
@@ -224,9 +377,14 @@ edid_read_block(struct hdmi_device *hdev, int block, u8 *buf, size_t len)
 
 	return 0;
 }
+#endif /* CONFIG_SEC_MHL_EDID */
 
 static int edid_read(struct hdmi_device *hdev, u8 **data)
 {
+#ifdef CONFIG_SEC_MHL_EDID
+	*data = exynos_hdmi_edid;
+	return 1 + (s8)exynos_hdmi_edid[0x7e];
+#else
 	u8 block0[EDID_BLOCK_SIZE];
 	u8 *edid;
 	int block = 0;
@@ -258,6 +416,7 @@ static int edid_read(struct hdmi_device *hdev, u8 **data)
 
 	*data = edid;
 	return block_cnt;
+#endif /* CONFIG_SEC_MHL_EDID */
 }
 
 static unsigned int get_ud_timing(struct fb_vendor *vsdb, unsigned int vic_idx)
@@ -290,6 +449,14 @@ static struct edid_preset *edid_find_preset(const struct fb_videomode *mode)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(edid_presets); i++, preset++) {
+#ifdef CONFIG_SEC_MHL_EDID
+		if (mhl_max_res == MHL_576P_50 && !(strncmp(preset->name, "720p@50", 10)))
+			return NULL;
+		else if (mhl_max_res == MHL_1080P_30  && !(strncmp(preset->name, "1080p@50", 10)))
+			return NULL;
+		else if (mhl_max_res == MHL_1080P_60 && !(strncmp(preset->name,	"2160p@24", 10)))
+			return NULL;
+#endif
 		if (mode->refresh == preset->refresh &&
 			mode->xres	== preset->xres &&
 			mode->yres	== preset->yres &&
@@ -400,7 +567,8 @@ static void edid_use_default_preset(void)
 		edid_presets[i].supported =
 			v4l_match_dv_timings(&edid_presets[i].dv_timings,
 					&preferred_preset, 0);
-	max_audio_channels = 2;
+	/* Default EDID setting is DVI */
+	/* max_audio_channels = 2; */
 }
 
 void edid_extension_update(struct fb_monspecs *specs)
@@ -456,34 +624,51 @@ void edid_extension_update(struct fb_monspecs *specs)
 	}
 
 	/* find UHD preset */
-	if (specs->vsdb->vic_len) {
-		for (vic_idx = 0; vic_idx < specs->vsdb->vic_len; vic_idx++) {
-			udmode_idx = get_ud_timing(specs->vsdb, vic_idx);
-			ud_preset =  edid_find_preset(&ud_modes[udmode_idx]);
-			if (ud_preset) {
-				pr_info("EDID: found %s", ud_preset->name);
-				ud_preset->supported = true;
-				if (first) {
-					preferred_preset = ud_preset->dv_timings;
-					first = false;
+#ifdef CONFIG_SEC_MHL_EDID
+	if (mhl_max_res >= MHL_UHD) {
+#endif
+		if (specs->vsdb->vic_len) {
+			for (vic_idx = 0; vic_idx < specs->vsdb->vic_len; vic_idx++) {
+				udmode_idx = get_ud_timing(specs->vsdb, vic_idx);
+				ud_preset =  edid_find_preset(&ud_modes[udmode_idx]);
+				if (ud_preset) {
+					pr_info("EDID: found %s", ud_preset->name);
+					ud_preset->supported = true;
+					if (first) {
+						preferred_preset = ud_preset->dv_timings;
+						pr_info("EDID: set %s", ud_preset->name);
+						first = false;
+					}
 				}
 			}
 		}
+#ifdef CONFIG_SEC_MHL_EDID
 	}
+#endif
 }
 
 int edid_update(struct hdmi_device *hdev)
 {
 	struct fb_monspecs specs;
 	struct edid_preset *preset;
+#ifdef CONFIG_SEC_MHL_EDID
+	u16 pre_xres = 0;
+	u16 pre_refresh = 0;
+#endif
 	bool first = true;
 	u8 *edid = NULL;
 	int channels_max = 0, support_bit_rates = 0, support_sample_rates = 0;
+#ifdef CONFIG_SEC_MHL_EDID
+	int basic_audio = 0;
+#endif
 	int block_cnt = 0;
 	int ret = 0;
 	int i;
 
 	edid_misc = 0;
+	max_audio_channels = 0;
+	audio_sample_rates = 0;
+	audio_bit_rates = 0;
 
 	block_cnt = edid_read(hdev, &edid);
 	if (block_cnt < 0)
@@ -494,6 +679,9 @@ int edid_update(struct hdmi_device *hdev)
 		goto out;
 	for (i = 1; i < block_cnt; i++)
 		ret = fb_edid_add_monspecs(edid + i * EDID_BLOCK_SIZE, &specs);
+#ifdef CONFIG_SEC_MHL_EDID
+	basic_audio = edid[EDID_NATIVE_FORMAT] & EDID_BASIC_AUDIO;
+#endif
 
 	preferred_preset = hdmi_conf[HDMI_DEFAULT_TIMINGS_IDX].dv_timings;
 	for (i = 0; i < ARRAY_SIZE(edid_presets); i++)
@@ -506,13 +694,29 @@ int edid_update(struct hdmi_device *hdev)
 		preset = edid_find_preset(&specs.modedb[i]);
 		if (preset) {
 			if (preset->supported == false) {
-				pr_info("EDID: found %s", preset->name);
+				pr_info("EDID: found %s\n", preset->name);
 				preset->supported = true;
 			}
+
+#ifdef CONFIG_SEC_MHL_EDID
+			if (preset->supported) {
+				first = false;
+				if (((preset->xres) > pre_xres) || (((preset->xres) == pre_xres)
+							&& ((preset->refresh) >= pre_refresh))) {
+					pre_xres = preset->xres;
+					pre_refresh = preset->refresh;
+
+					preferred_preset = preset->dv_timings;
+					pr_info("EDID: set %s", preset->name);
+				}
+			}
+#else
 			if (first) {
 				preferred_preset = preset->dv_timings;
+				pr_info("EDID: set %s", preset->name);
 				first = false;
 			}
+#endif
 		}
 	}
 
@@ -526,8 +730,10 @@ int edid_update(struct hdmi_device *hdev)
 		edid_misc = specs.misc;
 	pr_info("EDID: misc flags %08x", edid_misc);
 
+#ifndef CONFIG_SEC_MHL_EDID
 	if (!specs.audiodb)
 		goto out;
+#endif
 
 	for (i = 0; i < specs.audiodb_len; i++) {
 		if (specs.audiodb[i].format != FB_AUDIO_LPCM)
@@ -545,9 +751,21 @@ int edid_update(struct hdmi_device *hdev)
 			audio_sample_rates = support_sample_rates;
 			audio_bit_rates = support_bit_rates;
 		} else {
+#ifdef CONFIG_SEC_MHL_EDID
+			if (basic_audio) {
+				max_audio_channels = 2;
+				audio_sample_rates = FB_AUDIO_48KHZ; /*default audio info*/
+				audio_bit_rates = FB_AUDIO_16BIT;
+			} else {
+				max_audio_channels = 0;
+				audio_sample_rates = 0;
+				audio_bit_rates = 0;
+			}
+#else
 			max_audio_channels = 2;
 			audio_sample_rates = FB_AUDIO_44KHZ; /*default audio info*/
 			audio_bit_rates = FB_AUDIO_16BIT;
+#endif
 		}
 	} else {
 		max_audio_channels = 0;
@@ -564,12 +782,21 @@ out:
 	if (block_cnt == -EPROTO)
 		edid_misc = FB_MISC_HDMI;
 
+#ifndef CONFIG_SEC_MHL_EDID
 	kfree(edid);
+#endif
 	return block_cnt;
 }
 
 struct v4l2_dv_timings edid_preferred_preset(struct hdmi_device *hdev)
 {
+#ifdef CONFIG_SEC_MHL_EDID
+	if(hdmi_forced_resolution >= 0 &&
+			hdmi_forced_resolution < hdmi_pre_cnt)
+		return
+			edid_presets[hdmi_forced_resolution].dv_timings;
+	else
+#endif
 	return preferred_preset;
 }
 
