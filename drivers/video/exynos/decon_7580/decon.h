@@ -433,6 +433,15 @@ union decon_ioctl_data {
 	u32 vsync;
 };
 
+#ifdef CONFIG_LCD_DOZE_MODE
+enum decon_doze_mode {
+	DECON_DOZE_STATE_NORMAL = 0,
+	DECON_DOZE_STATE_DOZE,
+	DECON_DOZE_STATE_SUSPEND,
+	DECON_DOZE_STATE_DOZE_SUSPEND
+};
+#endif
+
 struct decon_underrun_stat {
 	u64	prev_bw;
 	int	chmap;

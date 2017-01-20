@@ -262,6 +262,12 @@ u32 dsim_reg_get_hozval(u32 id);
 #define DSIM_IOC_DUMP			_IOW('D', 8, u32)
 #define DSIM_IOC_VSYNC			_IOW('D', 9, u32)
 
+#define DSIM_REQ_POWER_OFF		0
+#define DSIM_REQ_POWER_ON		1
+#ifdef CONFIG_LCD_DOZE_MODE
+#define DSIM_REQ_DOZE_MODE		2
+#define DSIM_REQ_DOZE_SUSPEND		3
+#endif
 
 int dsim_write_hl_data(struct dsim_device *dsim, const u8 *cmd, u32 cmdSize);
 int dsim_read_hl_data(struct dsim_device *dsim, u8 addr, u32 size, u8 *buf);
