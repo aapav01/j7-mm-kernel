@@ -746,6 +746,52 @@ static void decon_enable_blocking_mode(struct decon_device *decon,
 	}
 }
 
+/* ---------- SYSTEM REGISTER CONTROL ----------- */
+static void decon_set_sysreg_disp_cfg(struct decon_device *decon)
+{
+	u32 val = readl(decon->sys_regs + DISP_CFG);
+
+	if (decon->pdata->dsi_mode == DSI_MODE_DUAL_DISPLAY)
+		val |= DISP_CFG_TV_MIPI_EN;
+
+	val |= DISP_CFG_UNMASK_GLOBAL;
+
+	writel(val, decon->sys_regs + DISP_CFG);
+}
+
+static void decon_set_sysreg_dsd_cfg(struct decon_device *decon,
+				enum decon_idma_type idma_type)
+{
+	u32 val = 0;
+	u32 en = decon->id ? ~0 : 0;
+	u32 old = readl(decon->sys_regs + DSD_CFG);
+
+	switch (idma_type) {
+	case IDMA_VG0:
+		val = (en & DSD_CFG_IDMA_VG0) |
+			(old & ~DSD_CFG_IDMA_VG0);
+		break;
+	case IDMA_VG1:
+		val = (en & DSD_CFG_IDMA_VG1) |
+			(old & ~DSD_CFG_IDMA_VG1);
+		break;
+	case IDMA_VGR0:
+		val = (en & DSD_CFG_IDMA_VGR0) |
+			(old & ~DSD_CFG_IDMA_VGR0);
+		break;
+	case IDMA_VGR1:
+		val = (en & DSD_CFG_IDMA_VGR1) |
+			(old & ~DSD_CFG_IDMA_VGR1);
+		break;
+	default:
+		val = old;
+		decon_err("not supported vpp type\n");
+	}
+
+	writel(val, decon->sys_regs + DSD_CFG);
+}
+
+
 #ifdef CONFIG_FB_WINDOW_UPDATE
 static void decon_wait_for_framedone(struct decon_device *decon)
 {

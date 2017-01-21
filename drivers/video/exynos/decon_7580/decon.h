@@ -652,6 +652,7 @@ struct dpu {
 
 struct decon_device {
 	void __iomem			*regs;
+	void __iomem			*sys_regs;
 	struct device			*dev;
 	struct exynos_decon_platdata	*pdata;
 	struct media_pad		pads[MAX_DECON_PADS];
@@ -732,6 +733,12 @@ struct decon_device {
 	struct dentry			*dpu_set;
 	struct dpu			dpu_save;
 #endif
+#ifdef CONFIG_LCD_DOZE_MODE
+	unsigned int decon_doze;
+	bool vsync_backup;
+	unsigned int req_display_on;
+#endif
+	int				id;
 
 };
 
@@ -867,16 +874,25 @@ static inline bool is_cam_not_running(struct decon_device *decon)
 
 static inline bool decon_lpd_enter_cond(struct decon_device *decon)
 {
-#ifdef CONFIG_LCD_HMT
+#if defined(CONFIG_LCD_ALPM) || defined(CONFIG_LCD_HMT) || defined(CONFIG_LCD_DOZE_MODE)
 	struct dsim_device *dsim = NULL;
 	dsim = container_of(decon->output_sd, struct dsim_device, sd);
-
-	return ((atomic_inc_return(&decon->lpd_trig_cnt) > DECON_ENTER_LPD_CNT) &&
-		(atomic_read(&decon->lpd_block_cnt) <= 0) && is_cam_not_running(decon) && (!dsim->priv.hmt_on));
-#else
-	return ((atomic_inc_return(&decon->lpd_trig_cnt) > DECON_ENTER_LPD_CNT) &&
-		(atomic_read(&decon->lpd_block_cnt) <= 0) && is_cam_not_running(decon));
 #endif
+	return ((atomic_read(&decon->lpd_block_cnt) <= 0) && is_cam_not_running(decon)
+#ifdef CONFIG_LCD_ALPM
+	&& (!dsim->alpm)
+#endif
+#ifdef CONFIG_LCD_HMT
+	&& (!dsim->priv.hmt_on)
+#endif
+#if defined(CONFIG_EXYNOS_DECON_MDNIE)
+	&& (decon->mdnie->auto_brightness < 6)
+#endif
+#ifdef CONFIG_LCD_DOZE_MODE
+	&& (!dsim->dsim_doze)
+#endif
+		&& (atomic_inc_return(&decon->lpd_trig_cnt) >= DECON_ENTER_LPD_CNT));
+
 }
 
 static inline bool is_any_pending_frames(struct decon_device *decon)
@@ -906,5 +922,14 @@ static inline bool is_any_pending_frames(struct decon_device *decon)
 
 #define DECON_IOC_LPD_EXIT_LOCK		_IOW('L', 0, u32)
 #define DECON_IOC_LPD_UNLOCK		_IOW('L', 1, u32)
+#ifdef CONFIG_LCD_DOZE_MODE
+#define S3CFB_POWER_MODE		_IOW('F', 223, __u32)
+enum disp_pwr_mode {
+	DECON_POWER_MODE_OFF = 0,
+	DECON_POWER_MODE_DOZE,
+	DECON_POWER_MODE_NORMAL,
+	DECON_POWER_MODE_DOZE_SUSPEND,
+};
+#endif
 
 #endif /* ___SAMSUNG_DECON_H__ */

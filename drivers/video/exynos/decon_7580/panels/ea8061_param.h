@@ -76,6 +76,20 @@ enum {
 #define AID_CMD_CNT			5
 #define ELVSS_CMD_CNT		3
 
+#ifdef CONFIG_LCD_DOZE_MODE
+#define	ALPM_OFF			0
+#define ALPM_ON_LOW			1
+#define HLPM_ON_LOW			2
+#define ALPM_ON_HIGH			3
+#define HLPM_ON_HIGH			4
+#endif
+
+#if defined(CONFIG_LCD_ALPM) || defined(CONFIG_LCD_DOZE_MODE)
+#define UNSUPPORT_ALPM					0
+#define SUPPORT_30HZALPM				1
+#define SUPPORT_LOWHZALPM				2
+#endif
+
 /* EA8061 */
 static const unsigned char SEQ_TEST_KEY_ON_F0[] = {
 	0xF0,
